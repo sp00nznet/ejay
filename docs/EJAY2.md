@@ -228,7 +228,7 @@ that does something.
 ```
 DMACHINE\PXD.TXT   18 quoted numbers, then four quoted fields per sample:
                    size, length in bars, name line 1, name line 2
-DMACHINE\MAX.TXT   one quoted path per sample, same order: "baaaf.pxd"
+DMACHINE\MAX.TXT   one quoted path per sample, same order: "ba\aaaf.pxd"
                    (MIN.TXT is the same list for a minimal install)
 ```
 
