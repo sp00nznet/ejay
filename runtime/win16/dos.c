@@ -111,8 +111,22 @@ static void write_found(CPU *cpu, const WIN32_FIND_DATAA *fd) {
     DLOG("[dos]   -> %s (%lu bytes)\n", name, (unsigned long)fd->nFileSizeLow);
 }
 
-static void ok(CPU *cpu)   { cpu->flags &= ~FLAG_CF; }
-static void err(CPU *cpu, uint16_t code) { cpu->flags |= FLAG_CF; cpu->ax = code; }
+/* DOS3Call takes no arguments, but it is still reached by a FAR CALL, so
+ * the 4-byte return address the lifter pushed has to come off here - the
+ * C return is the RETF. Leaking it costs 4 bytes of guest stack per INT
+ * 21h, which is invisible for a few calls and then shifts every local the
+ * caller owns: Borland's findnext wrapper started reading its own result
+ * from the wrong slot, returned "success" forever, and the directory scan
+ * never terminated. Twenty million calls before anyone noticed. */
+static void ok(CPU *cpu) {
+    cpu->flags &= ~FLAG_CF;
+    cpu->sp = (uint16_t)(cpu->sp + 4);
+}
+static void err(CPU *cpu, uint16_t code) {
+    cpu->flags |= FLAG_CF;
+    cpu->ax = code;
+    cpu->sp = (uint16_t)(cpu->sp + 4);
+}
 
 void KERNEL_DOS3CALL(CPU *cpu)
 {
@@ -158,8 +172,8 @@ void KERNEL_DOS3CALL(CPU *cpu)
 
         WIN32_FIND_DATAA fd;
         HANDLE h = FindFirstFileA(path, &fd);
-        DLOG("[dos] findfirst %s -> %s\n", path,
-             h == INVALID_HANDLE_VALUE ? "none" : "ok");
+        DLOG("[dos] findfirst %s -> %s (DTA %04X:%04X)\n", path,
+             h == INVALID_HANDLE_VALUE ? "none" : "ok", g_dta_seg, g_dta_off);
         if (h == INVALID_HANDLE_VALUE) { err(cpu, 18); return; }  /* no more files */
 
         g_search[i].used = 1;
@@ -173,10 +187,17 @@ void KERNEL_DOS3CALL(CPU *cpu)
     case 0x4F: {            /* find next, using the DTA set by find first */
         uint32_t key = ((uint32_t)g_dta_seg << 16) | g_dta_off;
         int i = find_search(key);
-        if (i < 0) { err(cpu, 18); return; }
+        if (i < 0) {
+            static int moaned;
+            if (moaned++ < 5)
+                fprintf(stderr, "[dos] findnext, no live search for DTA %04X:%04X\n",
+                        g_dta_seg, g_dta_off);
+            err(cpu, 18); return;
+        }
 
         WIN32_FIND_DATAA fd;
         if (!FindNextFileA(g_search[i].h, &fd)) {
+            DLOG("[dos] findnext -> no more files\n");
             close_search(i);
             err(cpu, 18);
             return;

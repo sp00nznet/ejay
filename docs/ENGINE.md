@@ -207,14 +207,52 @@ With that in place the engine reads its own library off the disc:
 [dos]   -> ABHQ.PXD (33007 bytes)
 ```
 
-### Indexing is slow, and it is not I/O
+### DOS3Call is a far call, and that cost a day
 
-About one sample per second, with **no file opened per sample** - the cost is
-entirely lifted CPU. The engine exports `ASortInit`, `ASortIn`, `ASortStart`
-and `ASortStart2`, so the likeliest explanation is an insertion sort into the
-1600-slot table: an O(n^2) shuffle of 258-byte records, which is cheap in 1997
-machine code and expensive when every guest instruction is a C statement.
-ponytail: measure before optimising - this may just be what the lift costs.
+`KERNEL.DOS3Call` takes no arguments, so it has a PASCAL purge of 0 - but it
+is still reached by a FAR CALL, and the lifter pushes a 4-byte return address
+before every shim. Every other shim pops it. The first version of `dos.c` did
+not, so each INT 21h leaked four bytes of guest stack.
+
+That is invisible for a few calls. Then it shifts every local the caller owns,
+and Borland's `findnext` wrapper began reading its own return value from the
+wrong slot - reporting success forever. The directory scan never terminated:
+
+```
+20,588,308  findnext with no live search
+         2  findfirst .../ba/????.pxd -> ok
+         1  findnext -> no more files
+```
+
+With the four bytes popped, the same scan walks every directory and stops. A
+three-sample library indexes in **0.096 s**, having previously run for over
+five minutes without finishing. An earlier note here blamed an O(n^2) sort for
+that; it was this, and the sort theory was wrong for the small case.
+
+The full retail library still takes longer than five minutes, but differently:
+all 35 directories now enumerate cleanly and the scan *completes* - the time
+goes somewhere after it, with ~1400 samples to place. The sort explanation is
+still plausible there, and still unmeasured.
+
+### Slots are not numbered from zero
+
+Indexing three samples into `ba/` marks slots **897, 898 and 899** in the
+1600-entry table, not 0-2, so the slot index is a position in the library
+address space rather than a running count. `ds:[0x11D6]` holds the count.
+
+Trigger the right slot - `APlay(3 + 897, ...)` - and the streaming loader
+builds a real path:
+
+```
+OpenFile(<root>\aa\bina.pxd)
+```
+
+The directory `aa` is correct for `BINP.PXD` and so are the first three
+letters. Only the fourth is wrong, and it is not any of `APlay`'s arguments -
+the word at `bp+0x14` and all three trailing dwords were tried, and none of
+them moves it. It comes out of the slot record the indexer filled, so the
+fourth letter is a variant the indexer is supposed to record and currently
+does not.
 
 ## AWaveDauer reads a .PXD directly
 

@@ -132,6 +132,25 @@ static void list_exports(void) {
     if ((EJAY_NUM_EXPORTS % 3) != 0) printf("\n");
 }
 
+/* Report the non-zero bytes in a DGROUP range. The engine keeps its tables
+ * sparse - 1600 slots with a handful marked - so a hex dump is mostly noise;
+ * what matters is WHICH offsets are set. */
+static void dump_range(CPU *cpu, uint16_t off, uint16_t len)
+{
+    unsigned shown = 0, total = 0;
+    printf("ds:[%04X..%04X]:\n", off, (uint16_t)(off + len - 1));
+    for (uint16_t i = 0; i < len; i++) {
+        uint8_t v = mem_read8(cpu, EJAY_AUTO_DATA_SEG, (uint16_t)(off + i));
+        if (!v) continue;
+        total++;
+        if (shown < 32) {
+            printf("  +%04X = %02X\n", i, v);
+            shown++;
+        }
+    }
+    printf("  %u non-zero bytes in %u\n", total, len);
+}
+
 /* Set the guest up as if a Win16 host were about to make a far call into the
  * DLL: fresh stack, DGROUP in DS, and the arguments below a far return address
  * so the callee's RETF has somewhere to land.
@@ -221,6 +240,7 @@ int main(int argc, char **argv) {
      * so watching its own state is the only way to see what a call achieved. */
     uint16_t peek[8];
     int npeek = 0;
+    uint16_t dump_off = 0, dump_len = 0;
     int pump_ms = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -229,6 +249,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--ring")) ring = 40;
         else if (!strcmp(argv[i], "--peek") && i + 1 < argc && npeek < 8)
             peek[npeek++] = (uint16_t)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--dump") && i + 2 < argc) {
+            dump_off = (uint16_t)strtoul(argv[++i], NULL, 0);
+            dump_len = (uint16_t)strtoul(argv[++i], NULL, 0);
+        }
         else if (!strcmp(argv[i], "--pump") && i + 1 < argc)
             pump_ms = (int)strtoul(argv[++i], NULL, 0);
         else if (ncall < 16) call[ncall++] = argv[i];
@@ -328,6 +352,7 @@ int main(int argc, char **argv) {
                    mem_read8(&cpu, EJAY_AUTO_DATA_SEG, peek[k]),
                    mem_read16(&cpu, EJAY_AUTO_DATA_SEG, peek[k]),
                    mem_read32(&cpu, EJAY_AUTO_DATA_SEG, peek[k]));
+        if (dump_len) dump_range(&cpu, dump_off, dump_len);
         printf("%s returned ax=%04X dx=%04X", e->name, cpu.ax, cpu.dx);
         /* A PASCAL callee pops the return address and its own arguments, so SP
          * must come back exactly 4 + bytes higher. Anything else means a purge
