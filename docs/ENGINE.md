@@ -362,6 +362,52 @@ queue - and the mixer is not rendering the loaded sample into the output
 block. That is the next thing to find, and it is the only thing left between
 here and sound.
 
+## Why it is still silent
+
+Arming the selector write-watch in cpu.h settles what the call graph could
+not. Over a 45-tick pump with a sample loaded:
+
+| block | writes | by |
+|---|---:|---|
+| output `0x4001` | 1,664,123 | 53DA 835k, 542F 415k, 3EFF 249k |
+| sample cache `0x401A` | 97,878 | about the size of the 97,742-byte file |
+| voice buffer `0x402E` | 12 | all from 3598 |
+
+The mix loop runs. But `53DA`, the biggest writer, is a fill loop - four
+dwords per iteration from a register, no source read anywhere - so it is
+**clearing** the output, not mixing into it. And `3598` stores the constant
+`0x100` five times, which is exactly the "peak 256, 40 non-zero" the voice
+buffer has measured in every run. Initialisation, never a decode.
+
+### The loader and APlay disagree about which voice
+
+Counting the loader chain per tick:
+
+```
+4D88  123   once per tick
+4D9E  984   eight per tick - every voice
+4ED4  984   eight per tick
+4EF8    1   the gate, passes exactly once
+```
+
+`4ED4` only proceeds for a voice whose `[record+0x44]` is **zero**, and the
+open-succeeded path at `5122` then marks that voice `0xFFFE` so it is never
+revisited - correct, for "do not reload a voice already loading". But record
+0, the one `APlay` arms, holds `0x0001` written by `49F3`. So the loader skips
+it and loads into a different voice. The voice the mixer reads is not the
+voice the file went into, and that is why the output is silence.
+
+### Two branches read backwards
+
+Worth recording, because both produced confident wrong conclusions:
+
+- `5122` is the **success** path. `cmp ax, 0xFFFF; jne 5122` fires when the
+  handle is *not* the error value. `0xFFFE` is "loading", not a failure code.
+- `4F80` exits on its very first line (`or ax, ax; jne 50CE`), and that is the
+  branch its single execution took - so it never reached the magic comparison.
+  Concluding "the magic matched, because 50A2 never ran" was reasoning about
+  code that had not executed.
+
 ## AWaveDauer reads a .PXD directly
 
 `AWaveDauer(far char *path)` is the one export that opens a sample by name.
