@@ -42,7 +42,21 @@ static CPU *g_cpu;
 
 static void guest_backtrace(void);
 
-void ejay_fn_hit(const char *n) { (void)n; }
+/* Function watch. cpu.h calls this from TRACE_FN on every lifted call when
+ * g_fncount is set, so --watch turns "does this function ever run" from a
+ * call-graph guess into a number. The static graph cannot follow
+ * dispatch_far, so it has already been wrong twice about exactly that.
+ * ponytail: linear strcmp over a handful of names. Fine at 8 watches. */
+#define MAX_WATCH 8
+static const char *w_name[MAX_WATCH];
+static unsigned long w_hits[MAX_WATCH];
+static int w_n;
+
+void ejay_fn_hit(const char *n)
+{
+    for (int i = 0; i < w_n; i++)
+        if (strcmp(n, w_name[i]) == 0) { w_hits[i]++; return; }
+}
 
 /* Selector-write watchpoint. g_wsel is 0 unless something sets it, so this
  * never fires in a normal run; it exists because "which lifted function
@@ -297,6 +311,10 @@ int main(int argc, char **argv) {
             pcm_len = strtoul(argv[++i], NULL, 0);
         }
         else if (!strcmp(argv[i], "--magic")) magic = 1;
+        else if (!strcmp(argv[i], "--watch") && i + 1 < argc && w_n < MAX_WATCH) {
+            w_name[w_n++] = argv[++i];
+            g_fncount = 1;            /* arms TRACE_FN's callback */
+        }
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc)
             volume = (int)strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--pump") && i + 1 < argc)
@@ -444,6 +462,8 @@ int main(int argc, char **argv) {
             }
         }
         printf("%u ticks, %u lifted calls\n", ticks, g_fn_ring_pos - before);
+        for (int k = 0; k < w_n; k++)
+            printf("  %s ran %lu times\n", w_name[k], w_hits[k]);
         if (magic) find_magic(&cpu);
         if (dump_len) dump_range(&cpu, dump_off, dump_len);
         for (int k = 0; k < npcm; k++) pcm_summary(&cpu, pcm_sel[k], pcm_len);
