@@ -40,7 +40,7 @@ if(RUNTIME_SOURCES)
     target_include_directories(ejay_runtime PRIVATE runtime)
     if(EJAY_TRACE)
         target_compile_definitions(ejay_runtime PRIVATE
-            EJAY_TRACE_WAVE EJAY_TRACE_WIN16)
+            EJAY_TRACE_WAVE EJAY_TRACE_WIN16 EJAY_TRACE_DOS)
     endif()
 endif()
 

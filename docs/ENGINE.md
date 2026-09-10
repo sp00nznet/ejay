@@ -153,6 +153,69 @@ bytes `74 50`, `tP` - against an in-memory buffer, reached through the
 huge-pointer arithmetic that `__AHSHIFT` controls. That constant was garbage
 until today, which is one of the places the fix mattered.
 
+## How the library gets indexed
+
+`APlay` command 2 does not remember a *file*. It remembers the sample
+library's **root directory**, and the engine concatenates it directly - no
+separator inserted - onto a pattern it builds itself. Passing a file path
+produces exactly the nonsense you would expect:
+
+```
+findfirst <root>AA\BINP.PXDba\????.pxd -> none
+```
+
+The right argument is a directory ending in a separator. With that, the
+sequence after command 2 is:
+
+1. `671A` zeroes 400 dwords at `0x121E` - the 1600-slot table - and clears the
+   counter at `0x11D6`.
+2. `673C` builds two-letter directory names: `'b'`, then `'a' + i` for
+   `i` in `0..0x16`, giving `ba` through `bw`, and branches at 23 into the
+   `a` range. The disc's own directories are `AA`-`AL` and `BA`-`BW`.
+3. For each one it searches `<root><dir>\????.pxd` - four-letter names, which is
+   why an empty slot record produces `aaaa.pxd`.
+
+### The search goes through INT 21h, not the Win16 API
+
+This is the part that had the whole thing stuck. Borland's C runtime implements
+`findfirst`/`findnext` on raw DOS calls, routed through `KERNEL.DOS3Call`, and
+a stub that fails every INT 21h fails *silently*: the enumeration finds
+nothing, the table stays zero, and every sample name comes out as `aaaa`.
+
+The calls it makes, in order, per directory:
+
+| AH | | |
+|---|---|---|
+| 30 | get DOS version | once, at startup |
+| 2F | get DTA | before each search |
+| 1A | set DTA | to a stack buffer, and back afterwards |
+| 4E | find first | `<root><dir>\????.pxd` |
+| 4F | find next | until it reports no more |
+
+`runtime/win16/dos.c` implements these over `FindFirstFileA`/`FindNextFileA`,
+keeping the Win32 search handle in a side table keyed by the DTA address - a
+HANDLE does not fit in the 21 reserved bytes DOS used, and the guest never
+looks inside them. Names are reported 8.3 and upper-cased, because the engine
+parses what it gets back.
+
+With that in place the engine reads its own library off the disc:
+
+```
+[dos] findfirst .../ba/????.pxd -> ok
+[dos]   -> ABFF.PXD (32829 bytes)
+[dos]   -> ABGO.PXD (32955 bytes)
+[dos]   -> ABHQ.PXD (33007 bytes)
+```
+
+### Indexing is slow, and it is not I/O
+
+About one sample per second, with **no file opened per sample** - the cost is
+entirely lifted CPU. The engine exports `ASortInit`, `ASortIn`, `ASortStart`
+and `ASortStart2`, so the likeliest explanation is an insertion sort into the
+1600-slot table: an O(n^2) shuffle of 258-byte records, which is cheap in 1997
+machine code and expensive when every guest instruction is a C statement.
+ponytail: measure before optimising - this may just be what the lift costs.
+
 ## AWaveDauer reads a .PXD directly
 
 `AWaveDauer(far char *path)` is the one export that opens a sample by name.

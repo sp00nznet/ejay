@@ -183,6 +183,11 @@ void ejay_set_data_dir(const char *dir) {
     g_dir[sizeof(g_dir) - 1] = 0;
 }
 
+/* dos.c resolves its find-first patterns against the same root. */
+void ejay_data_dir(char *out, int max) {
+    snprintf(out, (size_t)max, "%s", g_dir);
+}
+
 /* OpenFile(lpszFile, lpOpenBuff, wStyle). Only the styles the engine uses are
  * honoured: OF_READ/OF_WRITE/OF_READWRITE/OF_CREATE, plus OF_EXIST as a probe.
  * A relative name resolves against the data directory, so the engine's own
@@ -312,8 +317,6 @@ void KERNEL_GETVERSION(CPU *cpu)     { ret16(cpu, 0, 0x0A03); }  /* DOS 10, Win 
 void KERNEL_GETWINFLAGS(CPU *cpu)    { ret32(cpu, 0, 0x0403); }  /* 386 enhanced + 80387 */
 void KERNEL_INITTASK(CPU *cpu)       { ret16(cpu, 0, 1); }
 void KERNEL_GETMODULEUSAGE(CPU *cpu) { ret16(cpu, 2, 1); }
-void KERNEL_DOS3CALL(CPU *cpu)       { cpu->flags |= FLAG_CF; cpu->ax = 1; }  /* registers, no purge */
-
 void KERNEL_FATALEXIT(CPU *cpu) {
     fprintf(stderr, "[win16] FatalExit(%d) - the DLL gave up\n", (int)(int16_t)a16(cpu, 0));
     exit(1);
