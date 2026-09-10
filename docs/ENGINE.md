@@ -254,6 +254,67 @@ them moves it. It comes out of the slot record the indexer filled, so the
 fourth letter is a variant the indexer is supposed to record and currently
 does not.
 
+## The filename is arithmetic, not a lookup
+
+`APlay` builds the path from the slot index alone - there is no name table.
+At `6542` it divides by `0x2A4` (676 = 26^2), then by 26, adding `0x61` to
+each digit:
+
+```
+897 = 1*676 + 8*26 + 13   ->   b   i   n
+```
+
+which is exactly the `bina` it asks for. So slot 897 is not wrong - the engine
+decodes it faithfully, and the fourth letter is a separate variant that comes
+out as zero. Naming a sample the way the engine expects (`aa/BINA.PXD`) makes
+the round trip close: the indexer computes 897 from the name, and the loader
+computes the name back from 897.
+
+## A sample loads
+
+With that, triggering the slot and pumping the clock loads the file:
+
+```
+OpenFile(<root>\aa\bina.pxd)  -> ok
+lseek h=1 0 whence=1 -> 0          where am I
+lseek h=1 0 whence=2 -> 97742      how big is it
+lseek h=1 0 whence=0 -> 0          back to the start
+_hread -> 97742 of 97742           all of it
+```
+
+The seek matters: Borland sizes a file by seeking to the end, and that is a
+raw `INT 21h AH=42` on the handle `OpenFile` returned - so the DOS layer and
+the Win16 layer have to share one handle table. Without it the engine read
+against a length of `0xFFFFFFFF` and never learned the size.
+
+The tick work goes from ~130 lifted calls to about **9,700** once a sample is
+loaded, so the mixer is running on real data.
+
+## The format the engine asks for
+
+`3660` builds a `PCMWAVEFORMAT` on its stack before opening the device:
+
+| Field | Value |
+|---|---|
+| wFormatTag | 1 (PCM) |
+| nChannels | 2 |
+| nSamplesPerSec | `0xAC44` = 44,100 |
+| nAvgBytesPerSec | `0x0002B110` = 176,400 |
+| nBlockAlign | 4 |
+| wBitsPerSample | 16 |
+
+44.1 kHz, 16-bit stereo - in 1997, on a machine with 8 MB of RAM. It also
+settles the `AWaveDauer` reading: 604,800 at 44,100 Hz is 13.714 s, eight bars
+at 140 BPM.
+
+## What still gates the sound
+
+`3964` is the function that sets the playing bit (`or byte ds:[0xA4], 0x2`)
+and calls the waveOut path. After a full pump with a sample loaded,
+`ds:[0xA4]` is still `00` and `ds:[0x1208]` is still `FFFF` (no device), so
+`3964` is never reached. It sits at the end of the eight-voice loop in
+`5D72`, which means the loop is not completing, or is not entered.
+
 ## AWaveDauer reads a .PXD directly
 
 `AWaveDauer(far char *path)` is the one export that opens a sample by name.

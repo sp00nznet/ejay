@@ -241,6 +241,10 @@ static FILE *hfile(uint16_t h) {
     return (h && h != 0xFFFF && h <= MAX_FILES) ? g_files[h - 1] : NULL;
 }
 
+/* The engine opens a sample with OpenFile and then seeks in it with a raw
+ * INT 21h, so dos.c has to reach the same table: one handle space, two APIs. */
+FILE *ejay_hfile(uint16_t h) { return hfile(h); }
+
 void KERNEL__LCLOSE(CPU *cpu) {
     uint16_t h = a16(cpu, 0);
     FILE *f = hfile(h);

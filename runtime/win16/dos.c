@@ -39,6 +39,7 @@
 #endif
 
 void ejay_data_dir(char *out, int max);      /* from win16_impl.c */
+FILE *ejay_hfile(uint16_t h);                /* from win16_impl.c */
 
 /* ---- the DTA ---------------------------------------------------------- */
 #define DTA_ATTR   0x15
@@ -203,6 +204,44 @@ void KERNEL_DOS3CALL(CPU *cpu)
             return;
         }
         write_found(cpu, &fd);
+        ok(cpu);
+        return;
+    }
+
+    case 0x42: {            /* lseek: BX handle, CX:DX offset, AL origin */
+        FILE *f = ejay_hfile(cpu->bx);
+        if (!f) { err(cpu, 6); return; }    /* invalid handle */
+        long off = (long)(((uint32_t)cpu->cx << 16) | cpu->dx);
+        int whence = (cpu->ax & 0xFF) == 1 ? SEEK_CUR
+                   : (cpu->ax & 0xFF) == 2 ? SEEK_END : SEEK_SET;
+        if (fseek(f, off, whence) != 0) { err(cpu, 25); return; }
+        long pos = ftell(f);
+        DLOG("[dos] lseek h=%u %ld whence=%d -> %ld\n", cpu->bx, off, whence, pos);
+        cpu->ax = (uint16_t)pos;
+        cpu->dx = (uint16_t)((uint32_t)pos >> 16);
+        ok(cpu);
+        return;
+    }
+
+    case 0x3E:              /* close - OpenFile/_lclose own the table, so this
+                             * only has to not fail */
+        ok(cpu);
+        return;
+
+    case 0x3F: {            /* read: BX handle, CX bytes, DS:DX buffer */
+        FILE *f = ejay_hfile(cpu->bx);
+        if (!f) { err(cpu, 6); return; }
+        uint16_t want = cpu->cx, got = 0;
+        uint8_t chunk[4096];
+        while (got < want) {
+            size_t n = want - got < sizeof(chunk) ? (size_t)(want - got) : sizeof(chunk);
+            size_t r = fread(chunk, 1, n, f);
+            for (size_t i = 0; i < r; i++)
+                mem_write8(cpu, cpu->ds, (uint16_t)(cpu->dx + got + i), chunk[i]);
+            got += (uint16_t)r;
+            if (r < n) break;
+        }
+        cpu->ax = got;
         ok(cpu);
         return;
     }
