@@ -202,11 +202,102 @@ static int patch_import(HMODULE mod, const char *dll, const char *fn,
 static void peek(const char *when)
 {
     const char *b = (const char *)g_eng;
-    printf("  [%-12s] ready=%08lX astart=%d gates=%d/%d/%d placed=%d\n", when,
+    printf("  [%-12s] ready=%08lX astart=%d placed=%d | mixgate=%d armed=%d "
+           "dslive=%d crit=%d mode=%d\n", when,
            (unsigned long)*(DWORD *)(b + 0x434A0),
            *(int *)(b + 0x4342C),
-           *(int *)(b + 0x43394), *(int *)(b + 0x4339C), *(int *)(b + 0x433A4),
-           *(short *)(b + 0x429C8 + 0x6A));
+           *(short *)(b + 0x429C8 + 0x6A),
+           *(short *)(b + 0x434A8),   /* AStart opens this; AStop shuts it  */
+           *(short *)(b + 0x3AC68),   /* the mixer will not run without it  */
+           *(short *)(b + 0x433EC),   /* DStart sets it: DirectSound live   */
+           *(int   *)(b + 0x4336C),   /* critical sections initialised      */
+           *(short *)(b + 0x39DA4));  /* 0 play, 1 export, 2 record         */
+}
+
+/* ---- the sample library --------------------------------------------------
+ * A .PXD carries its own name in its header: "tPxD", then a NUL-terminated
+ * string, and eJay writes it as two lines - "Snare Beat
+Risk", "Perc.L
+Vers10"
+ * - which is exactly the pair of strings GFX_SampleZeichne wants for a block
+ * label. So the library is self-describing and needs no index file, which is
+ * just as well because there is not one.
+ *
+ * Dance eJay 2's own library ships on its second disc. eJay 1's is on ours, and
+ * the two engines share the format - the 1999 engine opens, decodes and plays a
+ * 1996 sample without being asked to do anything special about it.
+ */
+typedef struct {
+    char path[MAX_PATH];
+    char l1[24], l2[24];
+} SAMPLE;
+
+static SAMPLE g_lib[512];
+static int    g_lib_n;
+
+/* Names in the header are two lines separated by a newline, but not tidily:
+ * some start with the separator (one-line names), and they carry stray control
+ * characters that render as boxes. Trim, and promote a lone second line. */
+static void tidy(char *t)
+{
+    size_t a = 0, b;
+    while (t[a] && (unsigned char)t[a] < 32) a++;
+    if (a) memmove(t, t + a, strlen(t + a) + 1);
+    b = strlen(t);
+    while (b && (unsigned char)t[b - 1] <= 32) t[--b] = 0;
+}
+
+static void split_name(const char *raw, char *l1, char *l2, size_t n)
+{
+    const char *br = strchr(raw, '\n');
+    if (br) {
+        size_t k = (size_t)(br - raw);
+        if (k >= n) k = n - 1;
+        memcpy(l1, raw, k); l1[k] = 0;
+        snprintf(l2, n, "%s", br + 1);
+    } else {
+        snprintf(l1, n, "%s", raw);
+        l2[0] = 0;
+    }
+    tidy(l1); tidy(l2);
+    if (!l1[0] && l2[0]) { memcpy(l1, l2, n); l2[0] = 0; }
+}
+
+/* Walk the two-letter directories eJay files its samples in. */
+static int scan_library(const char *root)
+{
+    char pat[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    snprintf(pat, sizeof(pat), "%s\\*", root);
+    HANDLE dh = FindFirstFileA(pat, &fd);
+    if (dh == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (strlen(fd.cFileName) != 2) continue;
+        char sub[MAX_PATH];
+        snprintf(sub, sizeof(sub), "%s\\%s\\*.PXD", root, fd.cFileName);
+        WIN32_FIND_DATAA ff;
+        HANDLE fh = FindFirstFileA(sub, &ff);
+        if (fh == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (g_lib_n >= (int)(sizeof(g_lib) / sizeof(g_lib[0]))) break;
+            SAMPLE *sm = &g_lib[g_lib_n];
+            snprintf(sm->path, sizeof(sm->path), "%s\\%s\\%s",
+                     root, fd.cFileName, ff.cFileName);
+            char hdr[64];
+            FILE *f = fopen(sm->path, "rb");
+            if (!f) continue;
+            size_t got = fread(hdr, 1, sizeof(hdr) - 1, f);
+            fclose(f);
+            hdr[got] = 0;
+            if (got < 8 || memcmp(hdr, "tPxD", 4)) continue;
+            split_name(hdr + 4, sm->l1, sm->l2, sizeof(sm->l1));
+            g_lib_n++;
+        } while (FindNextFileA(fh, &ff) && g_lib_n < (int)(sizeof(g_lib)/sizeof(g_lib[0])));
+        FindClose(fh);
+    } while (FindNextFileA(dh, &fd));
+    FindClose(dh);
+    return g_lib_n;
 }
 
 /* ---- the names on the blocks --------------------------------------------
@@ -271,6 +362,22 @@ static int load_mix_names(const char *path)
 #define GRID_X1  596
 #define GRID_Y0  16
 #define GRID_Y1  323
+#define BROWSE_X0 176
+#define BROWSE_X1 539
+#define BROWSE_Y0 366   /* below the transport bar that overlaps the panel */
+#define BROWSE_Y1 472
+
+/* One arrangement, used twice: APlay places these on the engine's tracks and
+ * GFX_SampleZeichne draws the same list into the same lanes, so what is on the
+ * screen is what is playing rather than a picture of what might be. */
+typedef struct { int lane, bar, bars, lib; } SLOT;
+static SLOT g_song[] = {
+    { 0,  0, 4, 0 }, { 0,  8, 4, 0 }, { 1,  2, 4, 1 }, { 1, 10, 4, 1 },
+    { 2,  0, 2, 2 }, { 2,  4, 2, 2 }, { 2,  8, 2, 2 }, { 2, 12, 2, 2 },
+    { 3,  4, 4, 3 }, { 4,  0, 8, 4 }, { 5,  6, 4, 5 }, { 6,  8, 4, 6 },
+    { 7, 12, 4, 7 },
+};
+static const int g_song_n = (int)(sizeof(g_song) / sizeof(g_song[0]));
 
 static void draw_cursor(HWND wnd, double frac)
 {
@@ -363,6 +470,7 @@ static int capture(HWND wnd, const char *path)
  */
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
+#include <audiopolicy.h>
 
 /* The SDK only declares these; the import library that defines them moves
  * about between SDK versions, so spell them out. */
@@ -373,7 +481,54 @@ static const GUID k_IMMDeviceEnumerator =
 static const GUID k_IAudioMeterInformation =
     { 0xC02216F6, 0x8C67, 0x4B5B, { 0x9D, 0x00, 0xD0, 0x08, 0xE7, 0x3E, 0x00, 0x64 } };
 
+static const GUID k_IAudioSessionManager =
+    { 0xBFA971F1, 0x4D5E, 0x40BB, { 0x93, 0x5E, 0x96, 0x70, 0x39, 0xBF, 0xBE, 0xE4 } };
+
 static IAudioMeterInformation *g_meter;
+static ISimpleAudioVolume *g_sessionvol;
+
+/* The engine only fills its DirectSound buffer while its mixer is armed. When
+ * it is not, what DirectSound loops over is uninitialised - full-scale noise,
+ * and no engine volume setting touches it. So hold the process session muted
+ * for exactly as long as that flag is down. It is the one guarantee a bring-up
+ * run cannot be loud. */
+static void mute_unless_mixing(int armed)
+{
+    static int last = -1;
+    if (!g_sessionvol || armed == last) return;
+    g_sessionvol->lpVtbl->SetMute(g_sessionvol, armed ? FALSE : TRUE, NULL);
+    printf("  mixer %s -> audio %s\n", armed ? "armed" : "disarmed",
+           armed ? "on" : "muted");
+    last = armed;
+}
+
+/* Clamp this process's own audio session. ALautSet is the engine's mixer level
+ * and does nothing about a DirectSound buffer the engine has not filled - a
+ * bring-up run can and does put full-scale noise on the endpoint at a 1% engine
+ * volume. This is the knob that actually governs what leaves the process, so it
+ * is the one to hold down while testing. */
+static void clamp_session(int percent)
+{
+    IMMDeviceEnumerator *en = NULL;
+    IMMDevice *dev = NULL;
+    IAudioSessionManager *mgr = NULL;
+    ISimpleAudioVolume *vol = NULL;
+    if (FAILED(CoCreateInstance(&k_MMDeviceEnumerator, NULL, CLSCTX_ALL,
+                                &k_IMMDeviceEnumerator, (void **)&en)))
+        return;
+    if (SUCCEEDED(en->lpVtbl->GetDefaultAudioEndpoint(en, eRender, eConsole, &dev)) &&
+        SUCCEEDED(dev->lpVtbl->Activate(dev, &k_IAudioSessionManager, CLSCTX_ALL,
+                                        NULL, (void **)&mgr)) &&
+        SUCCEEDED(mgr->lpVtbl->GetSimpleAudioVolume(mgr, NULL, FALSE, &vol))) {
+        vol->lpVtbl->SetMasterVolume(vol, percent / 100.0f, NULL);
+        vol->lpVtbl->SetMute(vol, TRUE, NULL);   /* until the mixer says otherwise */
+        printf("  process session volume     -> %d%%, muted\n", percent);
+        g_sessionvol = vol;                      /* kept: the mute follows the mixer */
+    }
+    if (mgr) mgr->lpVtbl->Release(mgr);
+    if (dev) dev->lpVtbl->Release(dev);
+    en->lpVtbl->Release(en);
+}
 
 static void meter_open(void)
 {
@@ -426,7 +581,8 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);   /* a crash must not eat the trail */
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
     int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
-    int seq = 0, trace_files = 0;
+    int seq = 0, trace_files = 0, song = 0;
+    const char *libdir = NULL;
     /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
     int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
     const char *gfxdir = "GRAFIKA";
@@ -446,6 +602,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--play") && i + 1 < argc) { playfile = argv[++i]; dplay = 1; }
         else if (!strcmp(argv[i], "--dplay")) dplay = 1;
         else if (!strcmp(argv[i], "--seq")) seq = 1;
+        else if (!strcmp(argv[i], "--lib") && i + 1 < argc) libdir = argv[++i];
+        else if (!strcmp(argv[i], "--song")) { song = 1; seq = 1; samples = 1;
+                                                main_screen = 1; intro = 0; }
         else if (!strcmp(argv[i], "--trace-files")) trace_files = 1;
         else if (!strcmp(argv[i], "--no-intro")) intro = 0;
         else if (!strcmp(argv[i], "--main")) { main_screen = 1; intro = 0; }
@@ -467,7 +626,11 @@ int main(int argc, char **argv)
     printf("  %s at %p\n", ENGINE, (void *)g_eng);
     if (g_gfx) printf("  %s at %p\n", GFXDLL, (void *)g_gfx);
 
+    if (libdir)
+        printf("  sample library             -> %d samples under %s\n",
+               scan_library(libdir), libdir);
     meter_open();
+    clamp_session(volume);
 
     HWND wnd = make_window(640, 480);
     printf("  window %p\n", wnd);
@@ -615,31 +778,53 @@ int main(int argc, char **argv)
         BitBlt(g_canvas, 0, 0, g_screen.w, g_screen.h,
                (HDC)(INT_PTR)g_screen.hdc, 0, 0, SRCCOPY);
 
-        /* A plausible sixteen-bar arrangement: {lane, bar, bars, style}.
-         * Nothing is claimed about it being anybody's song - it is a layout to
-         * show the grid holding blocks the way the application does. */
-        static const int blocks[][4] = {
-            { 0,  0, 8, 0 }, { 0,  8, 8, 0 }, { 1,  2, 4, 1 }, { 1, 10, 4, 1 },
-            { 2,  0, 2, 2 }, { 2,  4, 2, 2 }, { 2,  8, 2, 2 }, { 2, 12, 2, 2 },
-            { 3,  4, 8, 1 }, { 4,  0, 16, 0 }, { 5,  6, 4, 2 }, { 6,  8, 8, 1 },
-            { 7, 12, 4, 0 },
-        };
         const int bar = (GRID_X1 - GRID_X0) / 16;   /* sixteen bars across */
         int drawn = 0;
         if (Zeich && griddc) {
-            for (int i = 0; i < (int)(sizeof(blocks) / sizeof(blocks[0])); i++) {
-                int lane = blocks[i][0], b0 = blocks[i][1];
-                int w = blocks[i][2] * bar, style = tex[blocks[i][3]];
+            for (int i = 0; i < g_song_n; i++) {
+                const SLOT *sl = &g_song[i];
+                int w = sl->bars * bar, style = tex[i % 3];
+                const SAMPLE *sm = (sl->lib >= 0 && sl->lib < g_lib_n)
+                                 ? &g_lib[sl->lib] : NULL;
                 if (!style) continue;
-                const char *nm = g_name_count ? g_names[i % g_name_count]
-                                              : "Sample";
-                Zeich(style, 0, w, nm, "", 0, 0);
-                BitBlt(g_canvas, GRID_X0 + b0 * bar, GRID_Y0 + lane * 18 + 1,
+                Zeich(style, 0, w, sm ? sm->l1 : "Sample", sm ? sm->l2 : "", 0, 0);
+                BitBlt(g_canvas, GRID_X0 + sl->bar * bar, GRID_Y0 + sl->lane * 18 + 1,
                        w - 2, 16, (HDC)(INT_PTR)griddc, 0, 0, SRCCOPY);
                 drawn++;
             }
         }
-        printf("  blocks drawn into the grid  -> %d\n", drawn);
+        printf("  blocks drawn into the grid -> %d\n", drawn);
+
+        /* ---- the browser ------------------------------------------------
+         * The bottom-centre panel is `G_SAMPLE_WINDOW` in eJay's own layout
+         * table, with `K_SAMPLE_VSCROLL` down its right edge and the twelve
+         * `B_GRUPPE_*` category buttons either side of it. It lists the samples
+         * in the selected category, and you drag one from here up into a lane.
+         * Measured off EJAY01A: x 176..539, y 350..472. */
+        if (g_lib_n) {
+            HFONT fnt = CreateFontA(-10, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                                    DEFAULT_CHARSET, 0, 0, DEFAULT_QUALITY, 0,
+                                    "Small Fonts");
+            HFONT old = (HFONT)SelectObject(g_canvas, fnt);
+            SetBkMode(g_canvas, TRANSPARENT);
+            int rows = 0;
+            while (rows < g_lib_n && BROWSE_Y0 + 6 + rows * 12 < BROWSE_Y1 - 12) {
+                int y = BROWSE_Y0 + 6 + rows * 12;
+                const SAMPLE *sm = &g_lib[rows];
+                const char *file = strrchr(sm->path, '\\');
+                SetTextColor(g_canvas, RGB(255, 190, 80));
+                TextOutA(g_canvas, BROWSE_X0 + 8, y, sm->l1, (int)strlen(sm->l1));
+                SetTextColor(g_canvas, RGB(160, 180, 240));
+                TextOutA(g_canvas, BROWSE_X0 + 140, y, sm->l2, (int)strlen(sm->l2));
+                SetTextColor(g_canvas, RGB(110, 130, 190));
+                if (file) TextOutA(g_canvas, BROWSE_X0 + 280, y, file + 1,
+                                   (int)strlen(file + 1));
+                rows++;
+            }
+            SelectObject(g_canvas, old);
+            DeleteObject(fnt);
+            printf("  browser rows               -> %d of %d samples\n", rows, g_lib_n);
+        }
         BitBlt(wdc, 0, 0, g_screen.w, g_screen.h, g_canvas, 0, 0, SRCCOPY);
         ReleaseDC(wnd, wdc);
     }
@@ -719,14 +904,36 @@ int main(int argc, char **argv)
         GetCurrentDirectoryA(sizeof(dir), dir);
         size_t dl = strlen(dir);
         if (dl && dir[dl - 1] != '\\') { dir[dl] = '\\'; dir[dl + 1] = 0; }
-        snprintf(full, sizeof(full), "%s%s", dir, playfile);
+        /* Leave an already-absolute name alone; concatenating onto it makes
+         * "C:\a\C:\b", which the engine opens exactly as enthusiastically as
+         * it opens anything else - and fails. */
+        if (playfile[0] && playfile[1] == ':')
+            snprintf(full, sizeof(full), "%s", playfile);
+        else
+            snprintf(full, sizeof(full), "%s%s", dir, playfile);
 
         if (ASetPfad)   printf("  ASetPfad(%s)\n", dir), ASetPfad(dir);
         if (AStop)      AStop();
         if (AMitte)     AMitte(0, 0);
         if (RWaveParam) RWaveParam(0x3c, 0x6666);
         if (ASetFader)  ASetFader(0, 0);
-        if (APlay) {
+        if (APlay && g_lib_n && song) {
+            /* One APlay per placed sample. Argument 8 is the track, 9 the start
+             * position in samples at 44,100 - AStart's 0xA17FC0 is four minutes
+             * in the same unit - and 6 is a status word the engine writes into.
+             * A bar at 120 BPM is 88,200 of them. */
+            static short st[64];
+            int placed = 0;
+            for (int i = 0; i < g_song_n && i < 64; i++) {
+                const SLOT *sl = &g_song[i];
+                if (sl->lib < 0 || sl->lib >= g_lib_n) continue;
+                st[i] = 0x63;
+                APlay(0, 0, 0, 0, 0, &st[i], g_lib[sl->lib].path,
+                      sl->lane, sl->bar * 88200, 0, 0, 0x100);
+                placed++;
+            }
+            printf("  APlay x%d across %d tracks\n", placed, g_song_n);
+        } else if (APlay) {
             int r = APlay(0, 0, 0, 0, 0, &status, full, 0, 0, 0, 0, 0x100);
             printf("  APlay(%s) -> %d, status %d\n", full, r, status);
         }
@@ -744,10 +951,20 @@ int main(int argc, char **argv)
     }
 
     float peak = 0.0f;
+    static float env[600];
+    int env_n = 0;
     double played = 0.0;   /* engine bytes from samples that already finished */
     DWORD t0 = GetTickCount();
     printf("\n  running %d ticks ...\n", ticks);
+    /* ATimer is the stub; RTimer is the pump. RTimer is the function the
+     * engine's own audio thread calls when it is allowed to, and it is what
+     * arms the mixer - without it the mixer tick bails on a disarmed flag and
+     * DirectSound plays an unfilled buffer, which is loud static. Dancejay
+     * pumps RTimer once per frame in its play loop; so does this. */
+    fn_i_v RTimer = (fn_i_v) GetProcAddress(g_eng, "RTimer");
     for (int i = 0; i < ticks; i++) {
+        if (seq && RTimer) RTimer();
+        if (seq) mute_unless_mixing(*(short *)((char *)g_eng + 0x3AC68));
         if (ATimer) ATimer();
         if (g_dplayupd) g_dplayupd();
         /* Refresh's argument is a millisecond timestamp into the intro, not a
@@ -776,6 +993,7 @@ int main(int argc, char **argv)
         pump_messages();
         float p = meter_peak();
         if (p > peak) peak = p;
+        if (env_n < (int)(sizeof(env) / sizeof(env[0]))) env[env_n++] = p;
         if (seq && i % 50 == 0)
             printf("    t=%5lums  AGetTime %8d  status %d  peak %.3f\n",
                    (unsigned long)(GetTickCount() - t0),
@@ -791,6 +1009,19 @@ int main(int argc, char **argv)
         Sleep(16);
     }
     printf("  endpoint peak during run   -> %.4f\n", peak);
+    /* Keep the envelope, not just the maximum. Static sits flat near full
+     * scale; a loop has a beat in it, and the difference is visible in one
+     * column of asterisks without anyone having to listen to it first. */
+    if (env_n > 8) {
+        printf("  envelope, one row per 8 ticks (128ms):\n");
+        for (int k = 0; k + 8 <= env_n; k += 8) {
+            float m = 0;
+            for (int j = 0; j < 8; j++) if (env[k + j] > m) m = env[k + j];
+            printf("    %5.3f |", m);
+            for (int j = 0; j < (int)(m * 40.0f + 0.5f); j++) putchar('#');
+            putchar('\n');
+        }
+    }
     if (dplay && DCheck) printf("  DPlayFileCheck(%d) at end   -> %d\n", chan, DCheck(chan));
     if (dplay) {
         /* Zeit = time. A number that advanced with the wall clock is the

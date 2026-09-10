@@ -46,13 +46,12 @@ of ours.
 
 ![The Dance eJay 2 workspace, playing](docs/img/ejay2-workspace.png)
 
-*Dance eJay 2's arrangement page. The chrome is loaded through the engine's own
-`ALoad`; the blocks in the lanes are drawn by `PXD32CL1.DLL` out of eJay's own
-marbled textures and labelled in its own Small Fonts; the names on them -
-`punchkick`, `halfopen12`, `HR16block1` - are read out of `HOUSE.MIX`, one of
-the thirteen saved arrangements on the disc. The white playback line steps
-across the sixteen lanes on the engine's own byte clock while the metronome
-sample plays, so the picture and the sound cannot drift apart.*
+*Dance eJay 2's arrangement page, playing. Thirteen samples are placed across
+the tracks with `APlay` and drawn into the same lanes by `PXD32CL1.DLL` from the
+same list, so what is on the screen is what is coming out of the speakers. The
+block labels and the browser rows are the samples' own two-line names, read out
+of their file headers - "Snare Beat / Risk", "Perc.L / Vers10", "Warm** /
+Line 1".*
 
 Three pieces, all of them real code:
 
@@ -67,22 +66,46 @@ Three pieces, all of them real code:
   into a lane. The order is the trap - `SampleInit` zeroes the entry count, so
   registering textures before it throws them away and every draw silently
   returns zero.
-- **The sound.** `AFenster(hwnd)` → `DStart(0)` → `DPlayFile(path, 0, channel)`,
-  played over DirectSound, and it is audible: `METRO.PXD`, eJay's metronome,
-  comes out as a metronome. `DGetZeit` advances at 176,400 bytes a second, which
-  is 44.1 kHz 16-bit stereo in real time, and the endpoint meter tracks
-  `ALautSet` - 0.42 at 10% engine volume, 0.20 at 5%, 0.08 at 2%.
+- **The sound.** Two paths, and they are not interchangeable.
 
-  `DPlayFile` is the **sample preview** path, though, not the song path. Handing
-  it `DINTRO.PXD` - which is a mix, not a sample - gets its bytes rendered as
-  PCM, and that is static. Hooking `CreateFileA` in the engine's import table
-  settles which is which: for a sample it opens and memory-maps the file; on the
-  sequencer path below it never opens anything at all.
+  `DPlayFile(path, 0, channel)` after `AFenster(hwnd)` → `DStart(0)` **previews one
+  sample**. `METRO.PXD` - which is a plain RIFF WAV despite the extension -
+  comes out as a metronome. `DINTRO.PXD` is a mix, not a sample, and handing it
+  over gets its bytes rendered as PCM, which is static.
+
+  The **song** path is `APlay` per placed sample, then `AStart`, then `RTimer`
+  on a clock:
+
+```
+ASetPfad(dir) → AStop → AMitte(0,0) → RWaveParam(60, 0x6666) → ASetFader(0,0)
+  → APlay(0,0,0,0,0, &status, file, track, bar*88200, 0,0, 0x100)  per sample
+  → AFenster(hwnd) → DStart(0) → AStart(0xA17FC0)
+  then RTimer() every frame
+```
+
+  `RTimer` is the piece that took longest to find. **`ATimer` is a stub in this
+  engine** - `mov eax, 1; ret`, the whole function - because the work moved onto
+  an audio thread in 1999. But the thread only arms the mixer when it is allowed
+  to, and `RTimer` is the same routine it calls to do it. Without `RTimer` on a
+  clock the mixer never arms, the engine never fills its DirectSound buffer, and
+  what plays is whatever was in that buffer already: full-scale noise that no
+  volume setting touches, because the engine is not the one making it.
+
+  `APlay`'s twelve arguments are in [EJAY2](docs/EJAY2.md); the ones that matter
+  are 8 (track), 9 (start, in samples at 44,100 - `AStart`'s 0xA17FC0 is four
+  minutes in the same unit) and 6 (a status word the engine writes into).
+
+- **The library.** eJay 2's samples ship on its second disc, which this one is
+  not. eJay 1's are here, and the 1999 engine opens, decodes and plays a 1996
+  `tPxD` sample without being asked to do anything special about it - 1,352 of
+  them. Each carries its own two-line name in its header, which is exactly the
+  pair of strings `GFX_SampleZeichne` wants for a block label and what the
+  browser lists.
 
 ```
 host32/build.bat host32/ejay2.c host32/ejay2.exe
 cd <the ejay folder>
-ejay2.exe --samples --dplay --mix ../../MIX/HOUSE.MIX --volume 4 --ticks 700
+ejay2.exe --song --lib <eJay 1 DANCE folder> --volume 3 --ticks 600
 ```
 
 None of it was reachable until `Dancejay.exe` gave up its call sites. It is VB5
@@ -104,28 +127,12 @@ drawing its 24 VU elements - those want coordinates registered first through
 `GFX_IntroSetKey`, whose eleven arguments are exactly a control name plus the
 ten numbers `K_640` gives it.*
 
-The **song** path - `APlay` placing a sample on a track, `AStart` running the
-arrangement - is mapped but not yet playing. Dancejay's own order is
-
-```
-ASetPfad(dir) → AStop → AMitte(0,0) → RWaveParam(60, 0x6666) → ASetFader(0,0)
-  → APlay(0,0,0,0,0, &status, file, 0,0,0,0, 0x100)
-  → AFenster(hwnd) → DStart(0) → AStart(0xA17FC0), then poll AGetTime
-```
-
-and every call succeeds: the engine's ready flag is set, `APlay` really does
-place the sample - its track record's count goes to 1 - and `AStart`'s handshake
-is answered by the audio thread. But `AGetTime` stays at 0 and the status word
-the caller hands `APlay` never moves off the 99 it was set to, because `ATimer`
-in this engine is a stub (`mov eax, 1; ret`, the whole function) and the clock
-behind `AGetTime` only runs when a global at `+0x39DA4` is 1. Finding what sets
-that is the next piece of the song path.
-
-Also still to do: the button states cut from `EJAY02`, the sample browser that
-fills the bottom-centre panel - `G_SAMPLE_WINDOW` in eJay's own layout table,
-with the twelve `B_GRUPPE_*` category buttons either side of it (Loop, Drum,
-Bass, Guitar, Seq, Layer / Rap, Voice, Effect, Xtra, GrooveG, Wave) - and the
-`GFX_IntroSetKey` layout pass.
+Still to do: the button states cut from `EJAY02`, the twelve `B_GRUPPE_*`
+category buttons that filter the browser (Loop, Drum, Bass, Guitar, Seq, Layer /
+Rap, Voice, Effect, Xtra, GrooveG, Wave), and the `GFX_IntroSetKey` layout pass
+that unsticks the loading screen. The status word `APlay` is handed still never
+moves off 99 even though the sample plays, so something is expected to read it
+that nothing here does yet.
 
 **The 1997 engine initialises and runs.** `DANCE02.DLL` is lifted whole -
 30,904 bytes of 16-bit machine code into 1,244 C functions - `LibMain`

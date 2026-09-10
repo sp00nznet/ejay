@@ -130,10 +130,10 @@ is `ALoad`'s bitmap path - they are memory-mapped: `CreateFileA`,
 `CreateFileMappingA`, `MapViewOfFile`. A real preview logs the open; the
 sequencer path below logs nothing, because it never gets as far as the file.
 
-## The song path is mapped, and stops in a knowable place
+## The song path: APlay places, AStart runs, RTimer pumps
 
-`APlay` places a sample on a track. Its twelve arguments, read off its own code
-rather than the call site:
+`APlay` places one sample on one track. Its twelve arguments, read off its own
+code rather than the call site:
 
 | arg | meaning |
 |---:|---|
@@ -148,76 +148,78 @@ rather than the call site:
 | 11 | stored at entry +8, also rounded to 4 |
 | 12 | stored at entry +0x104 |
 
-and it begins by comparing a global against `0x2A90CB20`, returning 0 without
-doing anything if it does not match. That is the engine's "memory is up" flag,
-set at the end of the allocation pass `AInit` runs, and most of the interesting
-exports check it.
+It begins by comparing a global against `0x2A90CB20` and returns 0 without doing
+anything if it does not match - the engine's "memory is up" flag, set at the end
+of the allocation pass `AInit` runs. Most of the interesting exports check it.
 
-Dancejay's own start-up order around it is:
+The whole sequence, Dancejay's own:
 
 ```
 ASetPfad(dir) -> AStop -> AMitte(0,0) -> RWaveParam(60, 0x6666) -> ASetFader(0,0)
-  -> APlay(0,0,0,0,0, &status, file, 0,0,0,0, 0x100)
+  -> APlay(0,0,0,0,0, &status, file, track, bar*88200, 0, 0, 0x100)   per sample
+  -> AFenster(hwnd) -> DStart(0) -> AStart(0xA17FC0)
+  then RTimer() every frame
 ```
 
-and its play button then does `ASetFader(0,0)` -> `AStart(0xA17FC0)` and polls
-`AGetTime(0)`. 0xA17FC0 is 10,584,000 - four minutes at 44,100 - so `AStart` is
-being told how long the arrangement is.
+`AStart`'s 0xA17FC0 is 10,584,000 - four minutes at 44,100 - so positions are in
+samples, and a bar at 120 BPM is 88,200 of them. `AGetTime` reports in
+milliseconds.
 
-Running exactly that: the ready flag is set, `APlay` places the sample (the
-track record's count at +0x6A goes to 1), and `AStart`'s handshake - it writes 2
-to a global and spins until the audio thread zeroes it - is answered. So the
-engine is up and its thread is alive.
+### RTimer is the pump, and ATimer is not
 
-But `AGetTime` returns 0 and the status word never moves off 99. Two things are
-worth knowing about why:
-
-- **`ATimer` is a stub in this engine.** The whole function is `mov eax, 1;
-  ret`. In 1997 the host pumped the clock; in 1999 the work is all on the audio
-  thread, so pumping it does nothing.
-- **`AGetTime` has two sources.** If a word at `+0x39DA4` is 1 it returns a
-  global directly; otherwise it falls through to the same clock `DGetZeit` uses,
-  which is gated on the "playing" word at `+0x433EC` that only `DStart` sets.
-  Finding what sets `+0x39DA4` is where the song path continues.
-
-## The workspace: chrome, then blocks
-
-`:Hauptbild` is `EJAY01` (640x480 chrome, sixteen arrangement lanes) and
-`EJAY02` (940x520, the sheet every button state is cut from). The chrome goes
-up with one `ALoad` and one `BitBlt`; the blocks in the lanes come from the
-`GFX_Sample*` family, in this order:
+**`ATimer` is a stub in this engine.** The entire function is:
 
 ```
-GFX_SampleInit(18, 0xa00, 12, textColour, backColour, "Small Fonts", 0)
-    -> the grid's own memory DC, and its entry count reset to zero
-GFX_SampleAddTexturePair("TEXTURE.BMP", "TEXTURE2.BMP", "DANCE2.PAL", 12, 25, 112)
-    -> 1, the index of the style it just appended
-GFX_SampleZeichne(style, 0, width, "name", "group", 0, 0)
-    -> renders one block into that DC, at `width` pixels
+100084C7  push ebp / mov ebp, esp / mov eax, 1 / pop ebp / ret
 ```
 
-Two things are easy to get wrong here.
+In 1997 the host pumped the clock. In 1999 the work moved onto an audio thread
+that `AInit` creates, and the host-side tick became a no-op nobody removed.
 
-**The order is backwards from the obvious one.** `GFX_SampleInit` zeroes the
-entry count (`this+0x90c`), so registering texture pairs before it throws them
-away - and `GFX_SampleZeichne` then fails its `index > count` guard and returns
-0 without drawing, which looks exactly like the arguments being wrong.
+But the thread does not do everything by itself. Its loop is:
 
-**`GFX_SampleZeichne` takes no coordinates** because it does not place
-anything: it draws one block into the grid's memory DC and the caller blits it
-into whichever lane it belongs in. That is why Dancejay's call site passes a
-style index, a zero, one number and two strings and nothing that looks like a
-position.
+```
+WaitForSingleObject(stop, 0)          exit if signalled
+if mode == 1 (export)   Sleep(100)
+else                    mixer_tick(); if (flag) RTimer(); dplay_update()
+if astart_request == 1  ...; astart_request = 0
+if astart_request == 2  AStart_work(length); astart_request = 0
+```
 
-`GFX_SampleInit`'s string is a **font face**, not a sample name - it goes
-straight into `CreateFontA` with the second argument as the height, and the
-three numbers after it are stored as colours.
+and `mixer_tick` refuses to do anything while a word at `+0x3AC68` is zero. The
+only code that sets it is inside `RTimer`. So `RTimer` on a clock is what arms
+the mixer, exactly as Dancejay's play loop does it.
 
-The lane geometry, measured off `EJAY01A` rather than guessed: the arrangement
-field's dark ground runs x 48..596, the orange lane rules sit 18 pixels apart
-from y 16 to y 323, and there are sixteen lanes. Twice eJay 1's eight.
+Without it: `AStart` still opens its own gate at `+0x434A8`, `DStart` still sets
+`+0x433EC` and starts DirectSound, the placed sample is still loaded from disc -
+and the mixer never fills the buffer, so what plays is whatever was in it.
+Full-scale noise, and no engine volume setting touches it, because the engine is
+not the one producing it. That is worth knowing before wiring a speaker up: the
+host here holds its own audio session muted for exactly as long as `+0x3AC68`
+is down.
 
-## GFX_IntroRefresh takes a timestamp
+### Which file goes to which call
+
+`DPlayFile` previews one sample and `METRO.PXD` - a plain RIFF WAV at 44.1kHz
+16-bit mono, despite the extension - plays through it correctly. `DINTRO.PXD` is
+`tPxD`, a mix rather than a sample, and comes out as static.
+
+The `tPxD` decode lives on the `APlay` path, and it is version-agnostic: the
+1999 engine opens, decodes and plays eJay 1's 1996 samples without special
+pleading. Which matters, because eJay 2's own library ships on a second disc.
+
+A `tPxD` header is the magic, then a NUL-terminated name written as two lines:
+
+```
+74 50 78 44  "Snare Beat
+Risk" 00 ...
+```
+
+- exactly the pair of strings `GFX_SampleZeichne` takes for a block label, and
+what fills the browser. Some names begin with the separator and most carry
+stray control bytes, so they need trimming before they render.
+
+## GFX_IntroRefresh takes a timestamp## GFX_IntroRefresh takes a timestamp
 
 Not a page number. The DLL compares its argument against 0xd48, 0xfb9, 0x1770,
 0x1ac2, 0x1c75, 0x50dc, 0x5d8e and 0x7148 - milliseconds into a 29-second
