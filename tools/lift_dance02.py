@@ -2,7 +2,7 @@
 lift_dance02.py - Lift DANCE02.DLL's code segment to src/segNNN.c.
 
 DANCE02.DLL is the 1997 Dance eJay audio engine: one CODE segment, one DATA
-segment, small model, 34 named entry points. Everything the game can hear goes
+segment, small model, 34 named entry points. Everything the program can play goes
 through it.
 
     python tools/lift_dance02.py

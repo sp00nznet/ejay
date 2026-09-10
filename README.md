@@ -283,12 +283,12 @@ The images above show this project running, to record that it works. Dance eJay
 and its interface artwork are the property of their rights holders - PXD
 Musicsoft / Fast Trak / eJay AG - and nothing here claims otherwise, nor is any
 of it redistributed: the background is read at runtime from a disc you supply,
-and the repository contains no game files. Same posture as the other recomp
+and the repository contains no application files. Same posture as the other recomp
 projects here.
 
 ## Legal
 
-No game files are included. Dance eJay is © 1997 and Dance eJay 2 © 1998–1999
+No application files are included. Dance eJay is © 1997 and Dance eJay 2 © 1998–1999
 PXD Musicsoft Inc. / Fast Trak / eJay AG; the audio DLLs are © Bernhard Throll
 / THROLL GmbH. All long out of print, all still in copyright as far as anyone
 can tell. Bring your own discs.

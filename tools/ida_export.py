@@ -2,7 +2,7 @@
 ida_export.py - Export accurate code structure + Win16 imports from IDA.
 
 Run headless with the idalib Python (3.11):
-    py -3.11 tools/ida_export.py game/CATZDLL.DLL work/ida_funcs.json
+    py -3.11 tools/ida_export.py work/DANCE02.DLL work/ida_funcs.json
 
 Produces TWO files:
   1. <out.json> (arg2): per NE CODE segment (NE number = IDA seg index + 1):

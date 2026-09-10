@@ -176,7 +176,7 @@ void KERNEL_HMEMCPY(CPU *cpu) {
  * 0xFFFF stays the error value Win16 callers test for. */
 #define MAX_FILES 64
 static FILE *g_files[MAX_FILES];
-static char g_dir[MAX_PATH];        /* where the game data lives */
+static char g_dir[MAX_PATH];        /* where the sample library lives */
 
 void ejay_set_data_dir(const char *dir) {
     strncpy(g_dir, dir ? dir : ".", sizeof(g_dir) - 1);
