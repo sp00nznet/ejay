@@ -97,6 +97,10 @@ static void sync_to_host(CPU *cpu, int i) {
     uint16_t d_seg = mem_read16(cpu, seg, (uint16_t)(off + W16_HDR_LPDATA + 2));
     WAVEHDR *h = &g_hdr[i].host;
     h->lpData          = (LPSTR)guest_ptr(cpu, d_seg, d_off);
+    /* Which guest block the driver will actually read. If this is not the
+     * block the mixer writes, nothing else matters. */
+    WLOG("[wave]   lpData = %04X:%04X (flat %u)\n", d_seg, d_off,
+         (unsigned)(cpu->sel_base[d_seg] + d_off));
     h->dwBufferLength  = mem_read32(cpu, seg, (uint16_t)(off + W16_HDR_BUFFERLEN));
     h->dwBytesRecorded = mem_read32(cpu, seg, (uint16_t)(off + W16_HDR_BYTESREC));
     h->dwUser          = mem_read32(cpu, seg, (uint16_t)(off + W16_HDR_USER));
@@ -133,6 +137,22 @@ static void CALLBACK wave_done(HWAVEOUT hwo, UINT msg, DWORD_PTR inst,
             return;
         }
     }
+}
+
+/* Test volume cap. The engine sets its own level, and what it queues while
+ * being brought up is unpredictable - a half-mixed buffer, or four stray
+ * samples that arrive as a click. The harness pins the device low unless
+ * told otherwise, so a bring-up run cannot be loud. */
+static int g_vol_pct = 20;
+
+void ejay_set_test_volume(int pct) { g_vol_pct = pct; }
+
+static void apply_test_volume(HWAVEOUT hwo)
+{
+    if (g_vol_pct < 0 || g_vol_pct > 100) return;      /* < 0 means leave alone */
+    DWORD one = (DWORD)((65535.0 * g_vol_pct) / 100.0);
+    waveOutSetVolume(hwo, (one & 0xFFFF) | (one << 16));
+    fprintf(stderr, "[wave] test volume pinned to %d%%\n", g_vol_pct);
 }
 
 /* ===== waveOut ========================================================= */
@@ -189,6 +209,7 @@ void MMSYSTEM_WAVEOUTOPEN(CPU *cpu) {
     }
     g_dev[slot].used = 1;
     g_dev[slot].out = hwo;
+    apply_test_volume(hwo);
     if (h_seg) mem_write16(cpu, h_seg, h_off, (uint16_t)(slot + 1));
     ret16(cpu, 22, MMSYSERR_NOERROR);
 }

@@ -65,6 +65,7 @@ void ejay_div0(const char *kind)
 }
 
 void ejay_set_data_dir(const char *dir);
+void ejay_set_test_volume(int pct);   /* -1 leaves the engine in charge */
 
 /* The multimedia timer, from runtime/win16/wave.c. The engine asks for a 32 ms
  * tick whose callback is DanceTimer, and a real timer would deliver it on the
@@ -149,6 +150,25 @@ static void dump_range(CPU *cpu, uint16_t off, uint16_t len)
         }
     }
     printf("  %u non-zero bytes in %u\n", total, len);
+}
+
+/* Summarise a range in ANY selector as 16-bit PCM: how much of it is
+ * non-zero and how loud. The engine mixes into GlobalAlloc blocks whose
+ * selectors are handed out at runtime, so "is there audio in there" needs
+ * to be answerable for an arbitrary selector, not just DGROUP. */
+static void pcm_summary(CPU *cpu, uint16_t sel, uint32_t len)
+{
+    uint32_t nz = 0, n = len / 2;
+    int32_t peak = 0;
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t off = k * 2;
+        int32_t v = (int16_t)mem_read16(cpu, (uint16_t)(sel + (off >> 16)),
+                                        (uint16_t)off);
+        if (v) nz++;
+        if (v < 0) v = -v;
+        if (v > peak) peak = v;
+    }
+    printf("  sel %04X: %u/%u non-zero, peak %d\n", sel, nz, n, (int)peak);
 }
 
 /* Set the guest up as if a Win16 host were about to make a far call into the
@@ -242,6 +262,8 @@ int main(int argc, char **argv) {
     int npeek = 0;
     uint16_t dump_off = 0, dump_len = 0;
     int pump_ms = 0;
+    int volume = 20;               /* percent; bring-up runs stay quiet */
+    uint16_t pcm_sel[8]; uint32_t pcm_len = 0; int npcm = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dir") && i + 1 < argc) dir = argv[++i];
@@ -253,6 +275,12 @@ int main(int argc, char **argv) {
             dump_off = (uint16_t)strtoul(argv[++i], NULL, 0);
             dump_len = (uint16_t)strtoul(argv[++i], NULL, 0);
         }
+        else if (!strcmp(argv[i], "--pcm") && i + 2 < argc && npcm < 8) {
+            pcm_sel[npcm++] = (uint16_t)strtoul(argv[++i], NULL, 0);
+            pcm_len = strtoul(argv[++i], NULL, 0);
+        }
+        else if (!strcmp(argv[i], "--volume") && i + 1 < argc)
+            volume = (int)strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--pump") && i + 1 < argc)
             pump_ms = (int)strtoul(argv[++i], NULL, 0);
         else if (ncall < 16) call[ncall++] = argv[i];
@@ -260,6 +288,7 @@ int main(int argc, char **argv) {
 
     SetUnhandledExceptionFilter(crash_handler);
     ejay_set_data_dir(dir);
+    ejay_set_test_volume(volume);
 
     CPU cpu;
     cpu_init(&cpu);
@@ -397,6 +426,7 @@ int main(int argc, char **argv) {
             }
         }
         printf("%u ticks, %u lifted calls\n", ticks, g_fn_ring_pos - before);
+        for (int k = 0; k < npcm; k++) pcm_summary(&cpu, pcm_sel[k], pcm_len);
         for (int k = 0; k < npeek; k++)
             printf("  ds:[%04X] = %02X  %04X  %08X\n", peek[k],
                    mem_read8(&cpu, EJAY_AUTO_DATA_SEG, peek[k]),
