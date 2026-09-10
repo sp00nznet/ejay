@@ -322,6 +322,7 @@ int main(int argc, char **argv) {
     int magic = 0;
     int window = 0;
     const char *shot = NULL;
+    int hot = 0;
     unsigned wsel = 0;
     uint16_t pcm_sel[8]; uint32_t pcm_len = 0; int npcm = 0;
 
@@ -342,6 +343,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--wsel") && i + 1 < argc)
             wsel = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--shot") && i + 1 < argc) { shot = argv[++i]; window = 1; }
+        else if (!strcmp(argv[i], "--hot")) hot = 1;
         else if (!strcmp(argv[i], "--window")) window = 1;
         else if (!strcmp(argv[i], "--magic")) magic = 1;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc && w_n < MAX_WATCH) {
@@ -493,6 +495,13 @@ int main(int argc, char **argv) {
                     atimer->fn(&cpu);
                 }
                 ticks++;
+            } else if (hot && atimer && atimer->fn) {
+                /* The engine mixes on demand, and in 1997 the host called
+                 * ATimer from a VB Timer far more often than the 32 ms
+                 * sequencer tick. --hot drives it as fast as it will go. */
+                enter_guest(&cpu);
+                push_retaddr(&cpu);
+                atimer->fn(&cpu);
             } else {
                 ejay_video_pump();
                 Sleep(1);
