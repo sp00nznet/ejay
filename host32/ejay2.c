@@ -47,6 +47,8 @@ typedef int (__stdcall *fn_i_pii)(const char *, int, int);
 typedef int (__stdcall *fn_tex)(const char *, const char *, const char *, int, int, int);
 typedef int (__stdcall *fn_sinit)(int, int, int, int, int, const char *, int);
 typedef int (__stdcall *fn_zeich)(int, int, int, const char *, const char *, int, int);
+typedef int (__stdcall *fn_aplay)(int, int, int, int, int, short *, const char *,
+                                  int, int, int, int, int);
 
 /* ALoad's argument, recovered from its own code: it OpenFile()s the name at
  * +0x14, parses the BMP (LZ-decompressing it first if the magic is SZDD, which
@@ -135,6 +137,119 @@ static void pump_messages(void)
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
+}
+
+/* ---- what is the engine actually opening? --------------------------------
+ * The placed sample is loaded on the audio thread, and a wrong path is not
+ * reported anywhere - the status word simply never changes. Swapping one entry
+ * in PXD32D4's import table for a logger answers it directly. */
+static HFILE (WINAPI *g_real_openfile)(LPCSTR, LPOFSTRUCT, UINT);
+static HANDLE (WINAPI *g_real_createfile)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
+                                          DWORD, DWORD, HANDLE);
+
+/* Samples do not come through OpenFile - that is ALoad's bitmap path. The
+ * engine memory-maps them: CreateFileA, CreateFileMappingA, MapViewOfFile. */
+static HANDLE WINAPI log_createfile(LPCSTR name, DWORD acc, DWORD share,
+                                    LPSECURITY_ATTRIBUTES sa, DWORD disp,
+                                    DWORD flags, HANDLE tmpl)
+{
+    HANDLE h = g_real_createfile(name, acc, share, sa, disp, flags, tmpl);
+    printf("  [CreateFile] %-52s -> %s\n", name ? name : "(null)",
+           h == INVALID_HANDLE_VALUE ? "FAILED" : "ok");
+    return h;
+}
+
+static HFILE WINAPI log_openfile(LPCSTR name, LPOFSTRUCT of, UINT style)
+{
+    HFILE h = g_real_openfile(name, of, style);
+    printf("  [OpenFile] %-56s -> %d\n", name ? name : "(null)", (int)h);
+    return h;
+}
+
+static int patch_import(HMODULE mod, const char *dll, const char *fn,
+                        void *repl, void **orig)
+{
+    unsigned char *base = (unsigned char *)mod;
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    DWORD rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!rva) return 0;
+    for (IMAGE_IMPORT_DESCRIPTOR *d = (IMAGE_IMPORT_DESCRIPTOR *)(base + rva); d->Name; d++) {
+        if (_stricmp((char *)(base + d->Name), dll)) continue;
+        IMAGE_THUNK_DATA *names = (IMAGE_THUNK_DATA *)(base + d->OriginalFirstThunk);
+        IMAGE_THUNK_DATA *addrs = (IMAGE_THUNK_DATA *)(base + d->FirstThunk);
+        for (; names->u1.AddressOfData; names++, addrs++) {
+            if (names->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
+            IMAGE_IMPORT_BY_NAME *n = (IMAGE_IMPORT_BY_NAME *)(base + names->u1.AddressOfData);
+            if (strcmp((char *)n->Name, fn)) continue;
+            DWORD old;
+            if (!VirtualProtect(&addrs->u1.Function, sizeof(void *), PAGE_READWRITE, &old))
+                return 0;
+            *orig = (void *)(UINT_PTR)addrs->u1.Function;
+            addrs->u1.Function = (UINT_PTR)repl;
+            VirtualProtect(&addrs->u1.Function, sizeof(void *), old, &old);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Peek at the engine's own globals. Their addresses come out of the
+ * disassembly, and watching them beats guessing which call quietly did
+ * nothing: 0x4342C is the handshake AStart spins on, 0x43394 / 0x4339C /
+ * 0x433A4 are the three gates AGetTime checks before it will report a
+ * position, and the word at track0+0x6A counts the samples APlay has placed. */
+static void peek(const char *when)
+{
+    const char *b = (const char *)g_eng;
+    printf("  [%-12s] ready=%08lX astart=%d gates=%d/%d/%d placed=%d\n", when,
+           (unsigned long)*(DWORD *)(b + 0x434A0),
+           *(int *)(b + 0x4342C),
+           *(int *)(b + 0x43394), *(int *)(b + 0x4339C), *(int *)(b + 0x433A4),
+           *(short *)(b + 0x429C8 + 0x6A));
+}
+
+/* ---- the names on the blocks --------------------------------------------
+ * A .MIX is a saved arrangement, and the disc ships thirteen of them. Every
+ * sample it places is stored as
+ *
+ *     01 <id:16> <len:16> <name> 00 ...        len = strlen + 2
+ *
+ * which is enough to read the names back without decoding the rest of the
+ * format. Labelling the blocks with eJay's own sample names beats making some
+ * up, and it is a first foothold in the song format for later.
+ */
+#define MAX_MIX_NAMES 64
+static char g_names[MAX_MIX_NAMES][32];
+static int  g_name_count;
+
+static int load_mix_names(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    unsigned char *d = (unsigned char *)malloc((size_t)n);
+    if (!d || fread(d, 1, (size_t)n, f) != (size_t)n) { free(d); fclose(f); return 0; }
+    fclose(f);
+
+    for (long i = 0; i + 8 < n && g_name_count < MAX_MIX_NAMES; ) {
+        if (d[i] != 1) { i++; continue; }
+        int len = d[i + 3] | (d[i + 4] << 8);
+        if (len < 4 || len > 32 || i + 5 + len > n) { i++; continue; }
+        const unsigned char *nm = d + i + 5;
+        int ok = nm[len - 2] == 0;
+        for (int k = 0; ok && k < len - 2; k++)
+            if (nm[k] < 32 || nm[k] > 126) ok = 0;
+        if (!ok) { i++; continue; }
+        memcpy(g_names[g_name_count], nm, (size_t)(len - 2));
+        g_names[g_name_count][len - 2] = 0;
+        g_name_count++;
+        i += 5 + len - 1;
+    }
+    free(d);
+    return g_name_count;
 }
 
 /* ---- the playback cursor ------------------------------------------------
@@ -311,9 +426,16 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);   /* a crash must not eat the trail */
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
     int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
+    int seq = 0, trace_files = 0;
+    /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
+    int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
     const char *gfxdir = "GRAFIKA";
     const char *shot = NULL;
-    const char *playfile = "DINTRO.PXD";
+    /* METRO.PXD, the metronome, is the only real sample on the install disc -
+     * the library itself lives on the second one. DINTRO.PXD is a mix, not a
+     * sample, and handing it to DPlayFile gets its bytes rendered as PCM. */
+    const char *playfile = "METRO.PXD";
+    const char *mixfile = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--ticks") && i + 1 < argc) ticks = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc) volume = atoi(argv[++i]);
@@ -323,9 +445,16 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--chan") && i + 1 < argc) chan = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--play") && i + 1 < argc) { playfile = argv[++i]; dplay = 1; }
         else if (!strcmp(argv[i], "--dplay")) dplay = 1;
+        else if (!strcmp(argv[i], "--seq")) seq = 1;
+        else if (!strcmp(argv[i], "--trace-files")) trace_files = 1;
         else if (!strcmp(argv[i], "--no-intro")) intro = 0;
         else if (!strcmp(argv[i], "--main")) { main_screen = 1; intro = 0; }
         else if (!strcmp(argv[i], "--samples")) { samples = 1; main_screen = 1; intro = 0; }
+        else if (!strcmp(argv[i], "--mix") && i + 1 < argc) mixfile = argv[++i];
+        else if (!strcmp(argv[i], "--font") && i + 4 < argc) {
+            fontsize = atoi(argv[++i]); face_a = atoi(argv[++i]);
+            face_b = atoi(argv[++i]); face_c = atoi(argv[++i]);
+        }
         else if (!strcmp(argv[i], "--scrcap")) scrcap = 1;
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
@@ -361,6 +490,18 @@ int main(int argc, char **argv)
            ADevice ? ADevice(0) : -1);
     printf("  AInit(hwnd)                -> %d (0 = no error)\n",
            AInit ? AInit((int)(INT_PTR)wnd) : -1);
+
+    /* Every interesting export in PXD32D4 begins by comparing a global against
+     * 0x2A90CB20 and returning 0 if it does not match - it is the engine's
+     * "memory is up" flag, set at the end of the allocation pass AInit runs.
+     * APlay silently does nothing without it, so read it rather than wonder. */
+    if (trace_files)
+        printf("  file hooks                 -> OpenFile %d, CreateFile %d\n",
+               patch_import(g_eng, "KERNEL32.dll", "OpenFile",
+                            (void *)log_openfile, (void **)&g_real_openfile),
+               patch_import(g_eng, "KERNEL32.dll", "CreateFileA",
+                            (void *)log_createfile, (void **)&g_real_createfile));
+    peek("after AInit");
 
     fn_i_ii SwapInit  = g_gfx ? (fn_i_ii) GetProcAddress(g_gfx, "GFX_AnimationSwapInit") : NULL;
     fn_i_i  SetActive = g_gfx ? (fn_i_i) GetProcAddress(g_gfx, "GFX_SetActiveWindow") : NULL;
@@ -441,12 +582,22 @@ int main(int argc, char **argv)
      * SampleInit returns), which is why the call carries no coordinates - the
      * caller blits it into whichever lane it belongs in. Its third argument is
      * the block width in pixels. */
+    if (mixfile)
+        printf("  %s -> %d sample names\\n", mixfile, load_mix_names(mixfile));
+
     if (samples && g_gfx && g_screen.hdc) {
         fn_tex   AddTex = (fn_tex)   GetProcAddress(g_gfx, "GFX_SampleAddTexturePair");
         fn_sinit SInit  = (fn_sinit) GetProcAddress(g_gfx, "GFX_SampleInit");
         fn_zeich Zeich  = (fn_zeich) GetProcAddress(g_gfx, "GFX_SampleZeichne");
 
-        int griddc = SInit ? SInit(18, 0xa00, 12, 0xFFFFFF, 0x000080, "Small Fonts", 0) : 0;
+        /* FONTS is eJay's typeface table, one block per screen resolution, and
+         * its fourth section is `SAMPLE`: "Small Fonts", normal, 10. The height
+         * is the LAST argument, not the third - GFX_SampleInit builds a
+         * std::string from argument 6 in place and hands CreateFontA that
+         * pointer as the face with argument 7 as nHeight. Passing 0 there gets
+         * a font with no height and a block with no label on it. */
+        int griddc = SInit ? SInit(18, 0xa00, face_a, face_b, face_c,
+                                   "Small Fonts", fontsize) : 0;
         printf("  GFX_SampleInit              -> %08X (the grid memory DC)\n", griddc);
         int tex[3] = { 0, 0, 0 };
         if (AddTex) {
@@ -480,7 +631,9 @@ int main(int argc, char **argv)
                 int lane = blocks[i][0], b0 = blocks[i][1];
                 int w = blocks[i][2] * bar, style = tex[blocks[i][3]];
                 if (!style) continue;
-                Zeich(style, 0, w, "Sample", "Loop", 0, 0);
+                const char *nm = g_name_count ? g_names[i % g_name_count]
+                                              : "Sample";
+                Zeich(style, 0, w, nm, "", 0, 0);
                 BitBlt(g_canvas, GRID_X0 + b0 * bar, GRID_Y0 + lane * 18 + 1,
                        w - 2, 16, (HDC)(INT_PTR)griddc, 0, 0, SRCCOPY);
                 drawn++;
@@ -529,7 +682,69 @@ int main(int argc, char **argv)
         if (DCheck)    printf("  DPlayFileCheck(%d)          -> %d\n", chan, DCheck(chan));
     }
 
+    /* ---- the sequencer -------------------------------------------------
+     * DPlayFile previews one sample file. It is not how a song gets played,
+     * and handing it DINTRO.PXD - which is eJay's own encoded format, not PCM,
+     * as its near-zero autocorrelation at every plausible width and offset
+     * says - gets you the bytes rendered as samples. Which is static.
+     *
+     * The song path is the sequencer, and Dancejay's start-up runs it in this
+     * order:
+     *
+     *     ASetPfad(dir) -> AStop() -> AMitte(0,0) -> RWaveParam(60, 0x6666)
+     *       -> ASetFader(0,0) -> APlay(0,0,0,0,0, &status, file, 0,0,0,0, 0x100)
+     *
+     * and its play button then does ASetFader(0,0) -> AStart(0xA17FC0) and
+     * pumps ATimer. 0xA17FC0 is 10,584,000 - four minutes at 44,100 - so
+     * AStart is being told how long the arrangement is, not a magic number.
+     *
+     * The status word starts at 99 and the engine writes progress into it,
+     * which is how the loader knows the sample is in. */
+    fn_i_v   AStop      = (fn_i_v)   GetProcAddress(g_eng, "AStop");
+    fn_i_ii  AMitte     = (fn_i_ii)  GetProcAddress(g_eng, "AMitte");
+    fn_i_ii  RWaveParam = (fn_i_ii)  GetProcAddress(g_eng, "RWaveParam");
+    fn_i_ii  ASetFader  = (fn_i_ii)  GetProcAddress(g_eng, "ASetFader");
+    fn_i_p   ASetPfad   = (fn_i_p)   GetProcAddress(g_eng, "ASetPfad");
+    fn_aplay APlay      = (fn_aplay) GetProcAddress(g_eng, "APlay");
+    fn_i_i   AGetTime   = (fn_i_i)   GetProcAddress(g_eng, "AGetTime");
+    fn_i_i   AStart     = (fn_i_i)   GetProcAddress(g_eng, "AStart");
+    static short status = 0x63;
+    if (seq) {
+        /* Dancejay builds both of these by concatenating a directory global
+         * with a name, so the directory carries its own trailing separator and
+         * the name APlay is given is absolute. Neither mistake is reported: the
+         * placed sample simply never loads and the status word the caller
+         * handed over stays at the 99 it was set to. */
+        char dir[MAX_PATH], full[MAX_PATH];
+        GetCurrentDirectoryA(sizeof(dir), dir);
+        size_t dl = strlen(dir);
+        if (dl && dir[dl - 1] != '\\') { dir[dl] = '\\'; dir[dl + 1] = 0; }
+        snprintf(full, sizeof(full), "%s%s", dir, playfile);
+
+        if (ASetPfad)   printf("  ASetPfad(%s)\n", dir), ASetPfad(dir);
+        if (AStop)      AStop();
+        if (AMitte)     AMitte(0, 0);
+        if (RWaveParam) RWaveParam(0x3c, 0x6666);
+        if (ASetFader)  ASetFader(0, 0);
+        if (APlay) {
+            int r = APlay(0, 0, 0, 0, 0, &status, full, 0, 0, 0, 0, 0x100);
+            printf("  APlay(%s) -> %d, status %d\n", full, r, status);
+        }
+        peek("after APlay");
+        /* The intro function's own order: AFenster, then DStart, then AStart -
+         * DStart is not only the sample-preview path's business. */
+        {
+            fn_i_i DStart = (fn_i_i) GetProcAddress(g_eng, "DStart");
+            if (AFenster) AFenster((int)(INT_PTR)wnd);
+            if (DStart)   printf("  DStart(0)                  -> %d\n", DStart(0));
+        }
+        if (ASetFader)  ASetFader(0, 0);
+        if (AStart)     printf("  AStart(0xA17FC0)           -> %d\n", AStart(0xA17FC0));
+        peek("after AStart");
+    }
+
     float peak = 0.0f;
+    double played = 0.0;   /* engine bytes from samples that already finished */
     DWORD t0 = GetTickCount();
     printf("\n  running %d ticks ...\n", ticks);
     for (int i = 0; i < ticks; i++) {
@@ -541,13 +756,30 @@ int main(int argc, char **argv)
          * seconds. Feeding it real elapsed time is what Dancejay's form timer
          * does; a synthetic i*16 runs the animation at whatever rate the host
          * manages instead. */
-        if (main_screen && dplay && DGetZeit && total > 0)
-            draw_cursor(wnd, (double)DGetZeit(chan) / (double)total);
+        if (main_screen && seq && AGetTime)
+            draw_cursor(wnd, (double)AGetTime(0) / (double)0xA17FC0);
+        else if (main_screen && dplay && DGetZeit) {
+            /* Sixteen bars at 120 BPM is 32 seconds, and DGetZeit is a byte
+             * offset into a 44.1kHz 16-bit stereo stream, so the sweep is the
+             * engine's own clock in musical units rather than a wall timer
+             * that happens to agree. Retrigger the sample when the engine says
+             * it has finished, and keep the bytes it already played. */
+            if (DCheck && !DCheck(chan)) {
+                played += DGetZeit(chan);
+                fn_i_pii DPF = (fn_i_pii) GetProcAddress(g_eng, "DPlayFile");
+                if (DPF) DPF(playfile, 0, chan);
+            }
+            draw_cursor(wnd, (played + DGetZeit(chan)) / (176400.0 * 32.0));
+        }
         int rc = 0;
         if (intro && Refresh) rc = Refresh((int)(GetTickCount() - t0));
         pump_messages();
         float p = meter_peak();
         if (p > peak) peak = p;
+        if (seq && i % 50 == 0)
+            printf("    t=%5lums  AGetTime %8d  status %d  peak %.3f\n",
+                   (unsigned long)(GetTickCount() - t0),
+                   AGetTime ? AGetTime(0) : -1, status, peak);
         if (verbose && i % 25 == 0)
             printf("    tick %4d  %6lums  refresh %d\n", i,
                    (unsigned long)(GetTickCount() - t0), rc);

@@ -25,19 +25,6 @@ cursor in a window - at the same time, out of recompiled 16-bit machine code.
 stepping across the eight-track grid while the intro streams to the sound card.
 The background is loaded at runtime from the user's own disc with `--bg`.*
 
-![The playback cursor](docs/img/cursor.png)
-
-*The engine's entire user interface: a one-pixel cursor stepping across the
-sample strip, drawn through its single `BitBlt` import. Everything else Dance
-eJay draws lives in `DANCE.EXE`, which is VB4 p-code and cannot be lifted.*
-
-![The decoded audio](docs/img/waveform.png)
-
-*Amplitude envelope of `INTRO.PXD` after the engine decoded it - 5.94 seconds
-of 8-bit 22 kHz audio, captured with `--wav` straight out of the buffers handed
-to `waveOutWrite`. It is decoded, not copied: no window of this output appears
-anywhere in the source file.*
-
 ```
 build-trace/ejay.exe --dir original/ejay1/DANCE/DMACHINE ^
     AInit:1 ADevice:d:0 AStart:d:2000000 InterStart:d:0 ^
@@ -60,10 +47,12 @@ of ours.
 ![The Dance eJay 2 workspace, playing](docs/img/ejay2-workspace.png)
 
 *Dance eJay 2's arrangement page. The chrome is loaded through the engine's own
-`ALoad`; the sample blocks in the lanes are drawn by `PXD32CL1.DLL` out of eJay's
-own marbled textures; the white playback line is stepping across the sixteen
-lanes while `DINTRO.PXD` plays, positioned from `DGetZeit` - the engine's own
-byte offset into the stream - so the picture and the sound cannot drift apart.*
+`ALoad`; the blocks in the lanes are drawn by `PXD32CL1.DLL` out of eJay's own
+marbled textures and labelled in its own Small Fonts; the names on them -
+`punchkick`, `halfopen12`, `HR16block1` - are read out of `HOUSE.MIX`, one of
+the thirteen saved arrangements on the disc. The white playback line steps
+across the sixteen lanes on the engine's own byte clock while the metronome
+sample plays, so the picture and the sound cannot drift apart.*
 
 Three pieces, all of them real code:
 
@@ -79,14 +68,21 @@ Three pieces, all of them real code:
   registering textures before it throws them away and every draw silently
   returns zero.
 - **The sound.** `AFenster(hwnd)` → `DStart(0)` → `DPlayFile(path, 0, channel)`,
-  played over DirectSound. The default endpoint meter peaks at 0.42 with the
-  engine volume at 10%, 0.20 at 5%, 0.08 at 2%; `DGetZeit` advances at 176,400
-  bytes a second, which is 44.1 kHz 16-bit stereo in real time.
+  played over DirectSound, and it is audible: `METRO.PXD`, eJay's metronome,
+  comes out as a metronome. `DGetZeit` advances at 176,400 bytes a second, which
+  is 44.1 kHz 16-bit stereo in real time, and the endpoint meter tracks
+  `ALautSet` - 0.42 at 10% engine volume, 0.20 at 5%, 0.08 at 2%.
+
+  `DPlayFile` is the **sample preview** path, though, not the song path. Handing
+  it `DINTRO.PXD` - which is a mix, not a sample - gets its bytes rendered as
+  PCM, and that is static. Hooking `CreateFileA` in the engine's import table
+  settles which is which: for a sample it opens and memory-maps the file; on the
+  sequencer path below it never opens anything at all.
 
 ```
 host32/build.bat host32/ejay2.c host32/ejay2.exe
 cd <the ejay folder>
-ejay2.exe --samples --dplay --ticks 320 --volume 3 --shot shot.bmp
+ejay2.exe --samples --dplay --mix ../../MIX/HOUSE.MIX --volume 4 --ticks 700
 ```
 
 None of it was reachable until `Dancejay.exe` gave up its call sites. It is VB5
@@ -108,9 +104,28 @@ drawing its 24 VU elements - those want coordinates registered first through
 `GFX_IntroSetKey`, whose eleven arguments are exactly a control name plus the
 ten numbers `K_640` gives it.*
 
-Still to do on the 1999 side: the block labels (the font goes in through
-`GFX_SampleInit`, but no text comes out yet), the button states cut from
-`EJAY02`, the sample browser, and the `GFX_IntroSetKey` layout pass.
+The **song** path - `APlay` placing a sample on a track, `AStart` running the
+arrangement - is mapped but not yet playing. Dancejay's own order is
+
+```
+ASetPfad(dir) → AStop → AMitte(0,0) → RWaveParam(60, 0x6666) → ASetFader(0,0)
+  → APlay(0,0,0,0,0, &status, file, 0,0,0,0, 0x100)
+  → AFenster(hwnd) → DStart(0) → AStart(0xA17FC0), then poll AGetTime
+```
+
+and every call succeeds: the engine's ready flag is set, `APlay` really does
+place the sample - its track record's count goes to 1 - and `AStart`'s handshake
+is answered by the audio thread. But `AGetTime` stays at 0 and the status word
+the caller hands `APlay` never moves off the 99 it was set to, because `ATimer`
+in this engine is a stub (`mov eax, 1; ret`, the whole function) and the clock
+behind `AGetTime` only runs when a global at `+0x39DA4` is 1. Finding what sets
+that is the next piece of the song path.
+
+Also still to do: the button states cut from `EJAY02`, the sample browser that
+fills the bottom-centre panel - `G_SAMPLE_WINDOW` in eJay's own layout table,
+with the twelve `B_GRUPPE_*` category buttons either side of it (Loop, Drum,
+Bass, Guitar, Seq, Layer / Rap, Voice, Effect, Xtra, GrooveG, Wave) - and the
+`GFX_IntroSetKey` layout pass.
 
 **The 1997 engine initialises and runs.** `DANCE02.DLL` is lifted whole -
 30,904 bytes of 16-bit machine code into 1,244 C functions - `LibMain`

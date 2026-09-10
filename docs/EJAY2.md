@@ -103,6 +103,8 @@ winmm and then plays through DirectSound (`ole32.CoCreateInstance`, with an
   a "quiet" bring-up run that passes a percentage straight through proves
   nothing, because nothing was ever audible.
 
+## DPlayFile previews a sample; it does not play a song
+
 Direct file playback, which is how eJay 2 previews a sample, is:
 
 ```
@@ -114,9 +116,69 @@ clock, `DPlayFileCheck(channel)` for done, `DGetZeit(channel)` for position -
 which is a byte offset into a 44100Hz 16-bit stereo stream and advances at
 176,400 a second, i.e. in real time.
 
-Measured on the default endpoint with `IAudioMeterInformation`, playing
-`DINTRO.PXD`: peak 0.08 at `ALautSet(2%)`, 0.20 at 5%, 0.42 at 10%. The engine
-is decoding and streaming, and the level tracks the knob.
+Measured on the default endpoint with `IAudioMeterInformation`: peak 0.08 at
+`ALautSet(2%)`, 0.20 at 5%, 0.42 at 10%. The level tracks the knob.
+
+**What you give it matters.** `DPlayFile` decodes one sample. `DINTRO.PXD` is a
+mix, not a sample, and handing it over gets its bytes rendered as PCM - static,
+and the kind that is easy to mistake for a wrong sample rate or a byte-order
+bug. `METRO.PXD`, the metronome, plays as a metronome.
+
+The cheap way to tell the two cases apart is to hook `CreateFileA` in the
+engine's import table and watch. Samples do not come through `OpenFile` - that
+is `ALoad`'s bitmap path - they are memory-mapped: `CreateFileA`,
+`CreateFileMappingA`, `MapViewOfFile`. A real preview logs the open; the
+sequencer path below logs nothing, because it never gets as far as the file.
+
+## The song path is mapped, and stops in a knowable place
+
+`APlay` places a sample on a track. Its twelve arguments, read off its own code
+rather than the call site:
+
+| arg | meaning |
+|---:|---|
+| 1 | voice, stored as a word at the entry +0x10 |
+| 2, 3 | stored at entry +0xFC, +0x100 |
+| 4, 5 | stored at entry +0xF4, +0xF8 |
+| 6 | pointer to the caller's status word, stored at +0xF0 |
+| 7 | the filename, `lstrcpyA`d into the entry at +0x12 |
+| 8 | track index - `* 0x84 + 0x100429C8` picks the track record |
+| 9 | start position, rounded down to a multiple of 4 |
+| 10 | length; entry+4 becomes start+length, or 0x6921CFF0 if zero |
+| 11 | stored at entry +8, also rounded to 4 |
+| 12 | stored at entry +0x104 |
+
+and it begins by comparing a global against `0x2A90CB20`, returning 0 without
+doing anything if it does not match. That is the engine's "memory is up" flag,
+set at the end of the allocation pass `AInit` runs, and most of the interesting
+exports check it.
+
+Dancejay's own start-up order around it is:
+
+```
+ASetPfad(dir) -> AStop -> AMitte(0,0) -> RWaveParam(60, 0x6666) -> ASetFader(0,0)
+  -> APlay(0,0,0,0,0, &status, file, 0,0,0,0, 0x100)
+```
+
+and its play button then does `ASetFader(0,0)` -> `AStart(0xA17FC0)` and polls
+`AGetTime(0)`. 0xA17FC0 is 10,584,000 - four minutes at 44,100 - so `AStart` is
+being told how long the arrangement is.
+
+Running exactly that: the ready flag is set, `APlay` places the sample (the
+track record's count at +0x6A goes to 1), and `AStart`'s handshake - it writes 2
+to a global and spins until the audio thread zeroes it - is answered. So the
+engine is up and its thread is alive.
+
+But `AGetTime` returns 0 and the status word never moves off 99. Two things are
+worth knowing about why:
+
+- **`ATimer` is a stub in this engine.** The whole function is `mov eax, 1;
+  ret`. In 1997 the host pumped the clock; in 1999 the work is all on the audio
+  thread, so pumping it does nothing.
+- **`AGetTime` has two sources.** If a word at `+0x39DA4` is 1 it returns a
+  global directly; otherwise it falls through to the same clock `DGetZeit` uses,
+  which is gated on the "playing" word at `+0x433EC` that only `DStart` sets.
+  Finding what sets `+0x39DA4` is where the song path continues.
 
 ## The workspace: chrome, then blocks
 
