@@ -15,6 +15,11 @@ alongside the same-era Win16/Win32 arc of DinoPark Tycoon (1993), El-Fish
 
 ## Status
 
+**It renders.** The 1997 engine initialises, runs, and draws its playback
+cursor into a real window - 62 BitBlt calls, 31 one-pixel bars marching across
+the display. Audio is not there yet: the device opens at 44.1 kHz stereo and
+takes a buffer, but the mixer clears that buffer rather than filling it.
+
 **The 1997 engine initialises and runs.** `DANCE02.DLL` is lifted whole -
 30,904 bytes of 16-bit machine code into 1,244 C functions - `LibMain`
 succeeds, and `AInit` executes 2,822 lifted functions on its way through the

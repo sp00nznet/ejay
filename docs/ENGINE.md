@@ -362,6 +362,33 @@ queue - and the mixer is not rendering the loaded sample into the output
 block. That is the next thing to find, and it is the only thing left between
 here and sound.
 
+## It renders
+
+`ATimer` reaches the drawing code in two hops, and it is pumped every tick -
+so the position bar should have been drawing all along. It was gated:
+
+```
+2E1E:  cmp dword ds:[0x1860], 0
+       jle 2F0C                  ; skip drawing
+       cmp dword ds:[0x316C], 0
+       je  2F0C                  ; skip drawing
+```
+
+`ds:[0x1860]` is `ABilder`'s **fourth** dword, and every attempt here had
+passed it as 0. `ds:[0x316C]` is the elapsed-time value the mixer computes in
+`4AE2`, so the clock has to be running too.
+
+With `ABilder(1, 0, 0, 640, 0, 10, 100)` and a pump, the engine paints:
+
+```
+62 BitBlt calls
+render.bmp: 2,798 white pixels across 31 distinct columns, x = 1..31
+```
+
+31 one-pixel vertical bars, each about 90 pixels tall against `h = 100 - 2`,
+at successive x positions - the playback cursor advancing. `--shot <file>`
+saves the memory DC as a BMP, so "it renders" is a file rather than a count.
+
 ## Why it is still silent
 
 Arming the selector write-watch in cpu.h settles what the call graph could

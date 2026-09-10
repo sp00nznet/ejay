@@ -18,6 +18,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <windows.h>
 
 #include "cpu.h"
@@ -90,6 +91,45 @@ void ejay_video_pump(void)
 }
 
 int ejay_video_blits(void) { return g_blits; }
+
+/* Save what the engine drew, so "it renders" is a file you can open
+ * rather than a count of BitBlt calls. 24-bit BMP, bottom-up, which is
+ * what GetDIBits hands back for a negative-height request anyway. */
+int ejay_video_save(const char *path)
+{
+    if (!g_memdc) return 0;
+    int stride = ((g_w * 3) + 3) & ~3;
+    long bytes = (long)stride * g_h;
+    unsigned char *px = (unsigned char *)malloc((size_t)bytes);
+    if (!px) return 0;
+
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = g_w;
+    bi.bmiHeader.biHeight = g_h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 24;
+    bi.bmiHeader.biCompression = BI_RGB;
+    if (!GetDIBits(g_memdc, g_bmp, 0, g_h, px, &bi, DIB_RGB_COLORS)) {
+        free(px); return 0;
+    }
+
+    BITMAPFILEHEADER fh;
+    memset(&fh, 0, sizeof(fh));
+    fh.bfType = 0x4D42;
+    fh.bfOffBits = sizeof(fh) + sizeof(BITMAPINFOHEADER);
+    fh.bfSize = fh.bfOffBits + (DWORD)bytes;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) { free(px); return 0; }
+    fwrite(&fh, sizeof(fh), 1, f);
+    fwrite(&bi.bmiHeader, sizeof(BITMAPINFOHEADER), 1, f);
+    fwrite(px, 1, (size_t)bytes, f);
+    fclose(f);
+    free(px);
+    return 1;
+}
 
 void ejay_video_close(void)
 {

@@ -105,6 +105,7 @@ int  ejay_video_open(int w, int h);
 void ejay_video_pump(void);
 void ejay_video_close(void);
 int  ejay_video_blits(void);
+int  ejay_video_save(const char *path);
 
 /* The multimedia timer, from runtime/win16/wave.c. The engine asks for a 32 ms
  * tick whose callback is DanceTimer, and a real timer would deliver it on the
@@ -320,6 +321,7 @@ int main(int argc, char **argv) {
     int volume = 20;               /* percent; bring-up runs stay quiet */
     int magic = 0;
     int window = 0;
+    const char *shot = NULL;
     unsigned wsel = 0;
     uint16_t pcm_sel[8]; uint32_t pcm_len = 0; int npcm = 0;
 
@@ -339,6 +341,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--wsel") && i + 1 < argc)
             wsel = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--shot") && i + 1 < argc) { shot = argv[++i]; window = 1; }
         else if (!strcmp(argv[i], "--window")) window = 1;
         else if (!strcmp(argv[i], "--magic")) magic = 1;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc && w_n < MAX_WATCH) {
@@ -397,7 +400,6 @@ int main(int argc, char **argv) {
 
     if (!ncall) {
         list_exports();
-    if (window) ejay_video_close();
         cpu_free(&cpu);
         return 0;
     }
@@ -511,6 +513,9 @@ int main(int argc, char **argv) {
                    mem_read32(&cpu, EJAY_AUTO_DATA_SEG, peek[k]));
     }
 
+    if (shot)
+        printf("%s %s\n", ejay_video_save(shot) ? "wrote" : "could not write", shot);
+    if (window) ejay_video_close();
     cpu_free(&cpu);
     return 0;
 }
