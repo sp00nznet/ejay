@@ -118,6 +118,43 @@ Measured on the default endpoint with `IAudioMeterInformation`, playing
 `DINTRO.PXD`: peak 0.08 at `ALautSet(2%)`, 0.20 at 5%, 0.42 at 10%. The engine
 is decoding and streaming, and the level tracks the knob.
 
+## The workspace: chrome, then blocks
+
+`:Hauptbild` is `EJAY01` (640x480 chrome, sixteen arrangement lanes) and
+`EJAY02` (940x520, the sheet every button state is cut from). The chrome goes
+up with one `ALoad` and one `BitBlt`; the blocks in the lanes come from the
+`GFX_Sample*` family, in this order:
+
+```
+GFX_SampleInit(18, 0xa00, 12, textColour, backColour, "Small Fonts", 0)
+    -> the grid's own memory DC, and its entry count reset to zero
+GFX_SampleAddTexturePair("TEXTURE.BMP", "TEXTURE2.BMP", "DANCE2.PAL", 12, 25, 112)
+    -> 1, the index of the style it just appended
+GFX_SampleZeichne(style, 0, width, "name", "group", 0, 0)
+    -> renders one block into that DC, at `width` pixels
+```
+
+Two things are easy to get wrong here.
+
+**The order is backwards from the obvious one.** `GFX_SampleInit` zeroes the
+entry count (`this+0x90c`), so registering texture pairs before it throws them
+away - and `GFX_SampleZeichne` then fails its `index > count` guard and returns
+0 without drawing, which looks exactly like the arguments being wrong.
+
+**`GFX_SampleZeichne` takes no coordinates** because it does not place
+anything: it draws one block into the grid's memory DC and the caller blits it
+into whichever lane it belongs in. That is why Dancejay's call site passes a
+style index, a zero, one number and two strings and nothing that looks like a
+position.
+
+`GFX_SampleInit`'s string is a **font face**, not a sample name - it goes
+straight into `CreateFontA` with the second argument as the height, and the
+three numbers after it are stored as colours.
+
+The lane geometry, measured off `EJAY01A` rather than guessed: the arrangement
+field's dark ground runs x 48..596, the orange lane rules sit 18 pixels apart
+from y 16 to y 323, and there are sixteen lanes. Twice eJay 1's eight.
+
 ## GFX_IntroRefresh takes a timestamp
 
 Not a page number. The DLL compares its argument against 0xd48, 0xfb9, 0x1770,

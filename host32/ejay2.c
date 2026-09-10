@@ -44,6 +44,9 @@ typedef int (__stdcall *fn_i_p)(void *);
 typedef int (__stdcall *fn_i_5)(int, int, int, void *, void *);
 typedef int (__stdcall *fn_i_4)(int, int, int, void *);
 typedef int (__stdcall *fn_i_pii)(const char *, int, int);
+typedef int (__stdcall *fn_tex)(const char *, const char *, const char *, int, int, int);
+typedef int (__stdcall *fn_sinit)(int, int, int, int, int, const char *, int);
+typedef int (__stdcall *fn_zeich)(int, int, int, const char *, const char *, int, int);
 
 /* ALoad's argument, recovered from its own code: it OpenFile()s the name at
  * +0x14, parses the BMP (LZ-decompressing it first if the magic is SZDD, which
@@ -62,6 +65,13 @@ typedef struct {
 } ALOADREC;
 
 static HMODULE g_eng, g_gfx;
+/* The workspace chrome and the sheet its controls are cut from, kept so the
+ * window can be repainted from them. */
+static ALOADREC g_screen, g_sheet;
+/* Chrome + sample blocks, composited once. The cursor erases back to this
+ * rather than to the bare chrome, or it would wipe the arrangement as it
+ * swept across. */
+static HDC g_canvas;
 static fn_i_v  g_dplayupd;
 
 static FARPROC need(HMODULE h, const char *name)
@@ -77,6 +87,14 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     /* The graphics DLL owns this client area: it GetDC()s the window and blits
      * straight into it, so Windows must not erase behind it. */
     if (m == WM_ERASEBKGND) return 1;
+    if (m == WM_PAINT && g_screen.hdc) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        BitBlt(dc, 0, 0, g_screen.w, g_screen.h,
+               g_canvas ? g_canvas : (HDC)(INT_PTR)g_screen.hdc, 0, 0, SRCCOPY);
+        EndPaint(h, &ps);
+        return 0;
+    }
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcA(h, m, w, l);
 }
@@ -117,6 +135,47 @@ static void pump_messages(void)
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
+}
+
+/* ---- the playback cursor ------------------------------------------------
+ * The 1997 engine drew this itself, through its one BitBlt import. The 1999
+ * engine does not - eJay 2 declares MoveToEx, LineTo and CreatePen from gdi32
+ * and draws it in Visual Basic - so the host owns it here, which is the same
+ * arrangement, just on the other side of the boundary.
+ *
+ * The geometry is measured off EJAY01A rather than guessed: the arrangement
+ * field's dark ground runs x 48..596, the orange lane rules sit 18 pixels
+ * apart from y 16 to y 323, and there are sixteen of them. Twice eJay 1's
+ * eight.
+ *
+ * Position comes from DGetZeit, the engine's own byte offset into the stream,
+ * so the line is synchronised to the audio by construction rather than by a
+ * timer that happens to agree.
+ */
+#define GRID_X0  48
+#define GRID_X1  596
+#define GRID_Y0  16
+#define GRID_Y1  323
+
+static void draw_cursor(HWND wnd, double frac)
+{
+    static int last = -1;
+    if (!g_screen.hdc) return;
+    if (frac < 0.0) frac = 0.0;
+    if (frac > 1.0) frac = 1.0;
+    int x = GRID_X0 + (int)((GRID_X1 - GRID_X0) * frac);
+
+    HDC dc = GetDC(wnd);
+    /* Erase by copying the chrome back from the DIB the engine loaded, the
+     * same way eJay 1's host repainted from its background DC. Without it the
+     * cursor smears into a solid bar instead of moving. */
+    if (last >= 0)
+        BitBlt(dc, last, GRID_Y0, 2, GRID_Y1 - GRID_Y0,
+               g_canvas ? g_canvas : (HDC)(INT_PTR)g_screen.hdc,
+               last, GRID_Y0, SRCCOPY);
+    PatBlt(dc, x, GRID_Y0, 2, GRID_Y1 - GRID_Y0, WHITENESS);
+    ReleaseDC(wnd, dc);
+    last = x;
 }
 
 /* Capture the client area and count what is not black. "The DLL returned 1" and
@@ -251,7 +310,7 @@ int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);   /* a crash must not eat the trail */
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
-    int intro = 1, scrcap = 0, frames = 0, verbose = 0;
+    int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
     const char *gfxdir = "GRAFIKA";
     const char *shot = NULL;
     const char *playfile = "DINTRO.PXD";
@@ -265,6 +324,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--play") && i + 1 < argc) { playfile = argv[++i]; dplay = 1; }
         else if (!strcmp(argv[i], "--dplay")) dplay = 1;
         else if (!strcmp(argv[i], "--no-intro")) intro = 0;
+        else if (!strcmp(argv[i], "--main")) { main_screen = 1; intro = 0; }
+        else if (!strcmp(argv[i], "--samples")) { samples = 1; main_screen = 1; intro = 0; }
         else if (!strcmp(argv[i], "--scrcap")) scrcap = 1;
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
@@ -349,6 +410,87 @@ int main(int argc, char **argv)
                    InitText(text.hdc, text.w, text.h, text.bits));
     }
 
+    /* ---- the workspace -------------------------------------------------
+     * SEITEN calls this page `:Hauptbild` - main picture - and gives it two
+     * bitmaps: EJAY01 is the 640x480 chrome, EJAY02 the 940x520 sheet every
+     * button state is cut from. The application blits the first straight to
+     * the window and then composites over it, which is what happens here. The
+     * sixteen arrangement lanes, the transport, the faders and the sample
+     * browser are all in that one image. */
+    if (main_screen && ALoad) {
+        char path[MAX_PATH];
+        snprintf(path, sizeof(path), "%s\\EJAY01A", gfxdir);
+        if (load_bitmap(ALoad, &g_screen, path)) {
+            HDC dc = GetDC(wnd);
+            BitBlt(dc, 0, 0, g_screen.w, g_screen.h,
+                   (HDC)(INT_PTR)g_screen.hdc, 0, 0, SRCCOPY);
+            ReleaseDC(wnd, dc);
+        }
+        snprintf(path, sizeof(path), "%s\\EJAY02A", gfxdir);
+        load_bitmap(ALoad, &g_sheet, path);
+    }
+
+    /* ---- the arrangement -----------------------------------------------
+     * The three texture pairs Dancejay registers are the block styles - the
+     * marbled fills eJay draws a placed sample with - and each AddTexturePair
+     * returns the 1-based index Zeichne selects with. Order matters and is the
+     * opposite of the obvious one: GFX_SampleInit builds the grid and zeroes
+     * its entry count, so registering textures first throws them away.
+     *
+     * Zeichne renders one block into the grid's own memory DC (the value
+     * SampleInit returns), which is why the call carries no coordinates - the
+     * caller blits it into whichever lane it belongs in. Its third argument is
+     * the block width in pixels. */
+    if (samples && g_gfx && g_screen.hdc) {
+        fn_tex   AddTex = (fn_tex)   GetProcAddress(g_gfx, "GFX_SampleAddTexturePair");
+        fn_sinit SInit  = (fn_sinit) GetProcAddress(g_gfx, "GFX_SampleInit");
+        fn_zeich Zeich  = (fn_zeich) GetProcAddress(g_gfx, "GFX_SampleZeichne");
+
+        int griddc = SInit ? SInit(18, 0xa00, 12, 0xFFFFFF, 0x000080, "Small Fonts", 0) : 0;
+        printf("  GFX_SampleInit              -> %08X (the grid memory DC)\n", griddc);
+        int tex[3] = { 0, 0, 0 };
+        if (AddTex) {
+            tex[0] = AddTex("TEXTURE.BMP",  "TEXTURE2.BMP", "DANCE2.PAL",  12, 25, 112);
+            tex[1] = AddTex("TEXTUREA.BMP", "TEXTURA2.BMP", "DANCE2A.PAL", 12, 25, 112);
+            tex[2] = AddTex("TEXTUREB.BMP", "TEXTURB2.BMP", "DANCE2B.PAL", 12, 25, 112);
+            printf("  GFX_SampleAddTexturePair    -> %d %d %d\n", tex[0], tex[1], tex[2]);
+        }
+
+        /* Composite onto a canvas so the playback cursor has the arrangement
+         * to erase back to, not the empty chrome. */
+        HDC wdc = GetDC(wnd);
+        g_canvas = CreateCompatibleDC(wdc);
+        SelectObject(g_canvas, CreateCompatibleBitmap(wdc, g_screen.w, g_screen.h));
+        BitBlt(g_canvas, 0, 0, g_screen.w, g_screen.h,
+               (HDC)(INT_PTR)g_screen.hdc, 0, 0, SRCCOPY);
+
+        /* A plausible sixteen-bar arrangement: {lane, bar, bars, style}.
+         * Nothing is claimed about it being anybody's song - it is a layout to
+         * show the grid holding blocks the way the application does. */
+        static const int blocks[][4] = {
+            { 0,  0, 8, 0 }, { 0,  8, 8, 0 }, { 1,  2, 4, 1 }, { 1, 10, 4, 1 },
+            { 2,  0, 2, 2 }, { 2,  4, 2, 2 }, { 2,  8, 2, 2 }, { 2, 12, 2, 2 },
+            { 3,  4, 8, 1 }, { 4,  0, 16, 0 }, { 5,  6, 4, 2 }, { 6,  8, 8, 1 },
+            { 7, 12, 4, 0 },
+        };
+        const int bar = (GRID_X1 - GRID_X0) / 16;   /* sixteen bars across */
+        int drawn = 0;
+        if (Zeich && griddc) {
+            for (int i = 0; i < (int)(sizeof(blocks) / sizeof(blocks[0])); i++) {
+                int lane = blocks[i][0], b0 = blocks[i][1];
+                int w = blocks[i][2] * bar, style = tex[blocks[i][3]];
+                if (!style) continue;
+                Zeich(style, 0, w, "Sample", "Loop", 0, 0);
+                BitBlt(g_canvas, GRID_X0 + b0 * bar, GRID_Y0 + lane * 18 + 1,
+                       w - 2, 16, (HDC)(INT_PTR)griddc, 0, 0, SRCCOPY);
+                drawn++;
+            }
+        }
+        printf("  blocks drawn into the grid  -> %d\n", drawn);
+        BitBlt(wdc, 0, 0, g_screen.w, g_screen.h, g_canvas, 0, 0, SRCCOPY);
+        ReleaseDC(wnd, wdc);
+    }
+
     quiet_the_devices(volume);
     /* ALautSet is 0..32768 on an exponential curve, not a percentage - the
      * argument is divided by 32768 and fed through exp() to a DirectSound
@@ -366,7 +508,16 @@ int main(int argc, char **argv)
      *     AFenster(hwnd) -> DStart(0) -> DPlayFile(path, 0, channel)
      *
      * with channel = index + 9, all of it read off Dancejay.exe's call sites. */
-    fn_i_i DCheck = (fn_i_i) GetProcAddress(g_eng, "DPlayFileCheck");
+    fn_i_i DCheck   = (fn_i_i) GetProcAddress(g_eng, "DPlayFileCheck");
+    fn_i_i DGetZeit = (fn_i_i) GetProcAddress(g_eng, "DGetZeit");
+    /* The decoded stream is the file minus its tPxD header, and DGetZeit is a
+     * byte offset into it - so the cursor reaches the right-hand edge exactly
+     * as the sample ends, with nothing to calibrate. */
+    long total = 0;
+    {
+        FILE *f = fopen(playfile, "rb");
+        if (f) { fseek(f, 0, SEEK_END); total = ftell(f) - 270; fclose(f); }
+    }
     if (dplay) {
         fn_i_i   DStart    = (fn_i_i) GetProcAddress(g_eng, "DStart");
         fn_i_pii DPlayFile = (fn_i_pii) GetProcAddress(g_eng, "DPlayFile");
@@ -390,6 +541,8 @@ int main(int argc, char **argv)
          * seconds. Feeding it real elapsed time is what Dancejay's form timer
          * does; a synthetic i*16 runs the animation at whatever rate the host
          * manages instead. */
+        if (main_screen && dplay && DGetZeit && total > 0)
+            draw_cursor(wnd, (double)DGetZeit(chan) / (double)total);
         int rc = 0;
         if (intro && Refresh) rc = Refresh((int)(GetTickCount() - t0));
         pump_messages();
@@ -411,7 +564,6 @@ int main(int argc, char **argv)
         /* Zeit = time. A number that advanced with the wall clock is the
          * difference between "the call was accepted" and "the engine is
          * actually streaming the file". */
-        fn_i_i DGetZeit = (fn_i_i) GetProcAddress(g_eng, "DGetZeit");
         if (DGetZeit) printf("  DGetZeit(%d) at end         -> %d\n", chan, DGetZeit(chan));
     }
 
