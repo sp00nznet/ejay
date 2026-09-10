@@ -362,6 +362,45 @@ queue - and the mixer is not rendering the loaded sample into the output
 block. That is the next thing to find, and it is the only thing left between
 here and sound.
 
+## What the interface looks like, and where our cursor belongs
+
+The disc carries its own answer in `DANCE\DMACHINE\GRAFIK`: four panels, each
+supplied at three sizes that decode exactly to 640x480, 800x600 and 1024x768,
+and every sub-panel is half the screen width.
+
+| Panel | 640x480 | what it is |
+|---|---|---|
+| `DANCE1` | 640 x 480 | the whole screen |
+| `DANCE2` | 325 x 246 | |
+| `DANCE3` | 324 x 325 | |
+| `DANCE4` | 320 x 160 | the credits panel |
+| `INTRO` | 512 x 577 | taller than the screen, so it scrolls |
+
+The full-screen background lays the program out as:
+
+- **Top, about half the height:** the arrangement grid - eight horizontal track
+  lanes numbered 1 to 8 down the left edge, each with its own indicator, and a
+  position bar across the top of it.
+- **Bottom left:** the category picker, two columns of buttons - Loop, Bass,
+  Layer, Voice, Effect, Drum, Sequence, Xtra, Rap, Wave - each with a slider.
+- **Bottom centre:** the sample list for whichever category is selected.
+- **Bottom right:** record controls, a sample counter, and a vertical volume
+  slider.
+- **Along the bottom:** Quit, Load, Save, New, the transport buttons, then
+  Erase, Import and Export.
+
+**Eight track lanes.** That is the same eight buffers `AInit` allocates at
+33,024 bytes each - the interface and the engine agree about the shape of the
+product, which is a satisfying place for the recon to land.
+
+The cursor this recompilation draws belongs in the arrangement grid at the top,
+sweeping left to right as the song plays. `ABilder`'s parameters place it: the
+sixth dword is its y, the seventh its height, the fifth its x origin, and the
+fourth is the span it moves across.
+
+The credits panel names Bernhard Throll, which is the same name stamped inside
+`DANCE02.DLL`'s own non-resident name table.
+
 ## It renders
 
 `ATimer` reaches the drawing code in two hops, and it is pumped every tick -
