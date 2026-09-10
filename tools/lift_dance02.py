@@ -18,7 +18,12 @@ import contextlib
 
 sys.path.insert(0, os.path.dirname(__file__))
 from ne_parse import parse_ne
-import ne_lift
+import ne_lift          # puts pcrecomp's tools/lift on sys.path, so lift16 imports
+import lift16
+
+# pcrecomp's lift16 emits a call to this at every DIV/IDIV by zero. Name it
+# ours rather than inheriting another project's prefix.
+lift16.DIV0_FN = 'ejay_div0'
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DLL = os.path.join(ROOT, 'work', 'DANCE02.DLL')

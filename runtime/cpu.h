@@ -143,13 +143,9 @@ void ejay_ds_broke(const char *callee, uint16_t ds0, uint16_t ds1);
 void ejay_sp_broke(const char *callee, uint16_t sp0, uint16_t sp1);
 /* A guest divide by zero would #DE on real hardware; the host must not die
    silently instead. Guarded in the lifted code, reported once per kind here. */
-/* Division by zero in guest code. pcrecomp's shared tools/lift/lift16.py
- * hard-codes the name `catz_div0` at its 45 emission sites - a prefix left
- * over from the Catz recomp that every project after it inherits. Aliasing it
- * costs one line; forking the lifter to parameterise the prefix costs a fork.
- * ponytail: upstream a prefix option to pcrecomp and drop the alias. */
+/* Division by zero in guest code, called from lifted DIV/IDIV. The name comes
+ * from lift16.DIV0_FN, set in tools/lift_dance02.py. */
 void ejay_div0(const char *kind);
-#define catz_div0 ejay_div0
 
 /* Where the current run of ds==0 began (main.c); always available. */
 extern const char *g_ds_zero_from;

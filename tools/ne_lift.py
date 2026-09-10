@@ -19,6 +19,10 @@ from typing import Optional
 _PC = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'tools', 'tools'))
 sys.path.insert(0, os.path.join(_PC, 'disasm'))
 sys.path.insert(0, os.path.join(_PC, 'lift'))
+# win16.py (the import resolver and its PASCAL purge table) lives in the
+# toolbox, not here: every Win16 NE project needs it, and a per-project copy is
+# how the last one drifted. Add ordinals and purge values upstream.
+sys.path.insert(0, os.path.join(_PC, 'ne'))
 sys.path.insert(0, os.path.dirname(__file__))
 
 from decode16 import Decoder, Instruction, OpType, Operand, REG16_NAMES
