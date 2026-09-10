@@ -35,8 +35,12 @@ stack: lifted 1997 code, the Win16 shim, Win32. 56 of the 60 imports are
 implemented, including the whole waveOut/waveIn/aux surface, and every call
 returns with the stack exactly balanced.
 
-Nothing is audible yet. `AInit` still returns 0, and until it succeeds the
-engine will not open a device. See [RECON](docs/RECON.md) for the teardown.
+Nothing is audible yet, and [ENGINE](docs/ENGINE.md) records why: the engine
+has **two clocks**, and the waveOut path hangs off the one the *host* was
+supposed to call, not the one it registers for itself. Driving both takes the
+work per tick from 4 lifted calls to about 130. What is still missing is the
+command that queues a sample - `APlay` is a multiplexed call and only its
+"remember this path" mode is decoded so far.
 
 | | |
 |---|---:|

@@ -66,6 +66,14 @@ void ejay_div0(const char *kind)
 
 void ejay_set_data_dir(const char *dir);
 
+/* The multimedia timer, from runtime/win16/wave.c. The engine asks for a 32 ms
+ * tick whose callback is DanceTimer, and a real timer would deliver it on the
+ * driver's thread - into a CPU model that is one struct with one stack. So the
+ * timer is registered but not started, and the tick is run here instead, on
+ * the thread that owns the CPU. */
+int  ejay_timer_pending(void);
+void ejay_timer_fire(CPU *cpu, void (*dispatch)(CPU *, uint16_t, uint16_t));
+
 /* ---- the indirect-call dispatchers live in src/_dispatch.c ---- */
 
 void int_handler(CPU *cpu, int int_num) {
@@ -208,11 +216,21 @@ int main(int argc, char **argv) {
     char *call[16];
     int ncall = 0;
     int ring = 0;
+    /* DGROUP offsets to report after each call. The engine says almost nothing
+     * through its return values - AInit answers with a bitmask in ds:[0xA4] -
+     * so watching its own state is the only way to see what a call achieved. */
+    uint16_t peek[8];
+    int npeek = 0;
+    int pump_ms = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dir") && i + 1 < argc) dir = argv[++i];
         else if (!strcmp(argv[i], "--image") && i + 1 < argc) img = argv[++i];
         else if (!strcmp(argv[i], "--ring")) ring = 40;
+        else if (!strcmp(argv[i], "--peek") && i + 1 < argc && npeek < 8)
+            peek[npeek++] = (uint16_t)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--pump") && i + 1 < argc)
+            pump_ms = (int)strtoul(argv[++i], NULL, 0);
         else if (ncall < 16) call[ncall++] = argv[i];
     }
 
@@ -305,6 +323,11 @@ int main(int argc, char **argv) {
                 printf("    %s\n",
                        g_fn_ring[(g_fn_ring_pos - (unsigned)k) & (EJAY_FN_RING_SIZE - 1)]);
         }
+        for (int k = 0; k < npeek; k++)
+            printf("  ds:[%04X] = %02X  %04X  %08X\n", peek[k],
+                   mem_read8(&cpu, EJAY_AUTO_DATA_SEG, peek[k]),
+                   mem_read16(&cpu, EJAY_AUTO_DATA_SEG, peek[k]),
+                   mem_read32(&cpu, EJAY_AUTO_DATA_SEG, peek[k]));
         printf("%s returned ax=%04X dx=%04X", e->name, cpu.ax, cpu.dx);
         /* A PASCAL callee pops the return address and its own arguments, so SP
          * must come back exactly 4 + bytes higher. Anything else means a purge
@@ -315,6 +338,45 @@ int main(int argc, char **argv) {
             printf("   *** sp %04X, expected %04X (off by %d) ***",
                    cpu.sp, expect, (int)(int16_t)(cpu.sp - expect));
         printf("\n");
+    }
+
+    /* Run the engine's own clock. DanceTimer is what refills and queues the
+     * mixing buffers, so without it the engine is initialised and silent. Each
+     * tick is a far call into lifted code from the thread that owns the CPU,
+     * which is why the timer was never handed to the driver in the first
+     * place. */
+    if (pump_ms > 0) {
+        printf("\npumping the engine's 32 ms clock for %d ms ...\n", pump_ms);
+        fflush(stdout);
+        DWORD until = GetTickCount() + (DWORD)pump_ms;
+        unsigned ticks = 0;
+        unsigned before = g_fn_ring_pos;
+        const EjayExport *atimer = find_export("ATimer");
+        while ((int32_t)(GetTickCount() - until) < 0) {
+            if (ejay_timer_pending()) {
+                enter_guest(&cpu);
+                ejay_timer_fire(&cpu, dispatch_far);
+                /* ATimer is the other half of the clock. DanceTimer is what
+                 * timeSetEvent registers, but the mixer's waveOut path hangs
+                 * off ATimer - which the VB front end called from a Timer
+                 * control of its own. Both have to run, or the engine keeps
+                 * time and never queues a buffer. */
+                if (atimer && atimer->fn) {
+                    enter_guest(&cpu);
+                    push_retaddr(&cpu);
+                    atimer->fn(&cpu);
+                }
+                ticks++;
+            } else {
+                Sleep(1);
+            }
+        }
+        printf("%u ticks, %u lifted calls\n", ticks, g_fn_ring_pos - before);
+        for (int k = 0; k < npeek; k++)
+            printf("  ds:[%04X] = %02X  %04X  %08X\n", peek[k],
+                   mem_read8(&cpu, EJAY_AUTO_DATA_SEG, peek[k]),
+                   mem_read16(&cpu, EJAY_AUTO_DATA_SEG, peek[k]),
+                   mem_read32(&cpu, EJAY_AUTO_DATA_SEG, peek[k]));
     }
 
     cpu_free(&cpu);
