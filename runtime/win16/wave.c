@@ -262,6 +262,22 @@ void MMSYSTEM_WAVEOUTWRITE(CPU *cpu) {
     DWORD flags = g_hdr[i].host.dwFlags;
     sync_to_host(cpu, i);
     g_hdr[i].host.dwFlags = flags & ~WHDR_DONE;   /* prepared, not yet done */
+    /* A successful write says nothing about the content. Report the peak of
+     * the 16-bit frames actually being handed to the driver, so "the engine
+     * queued a buffer" and "the engine mixed audio" stay separate claims. */
+    {
+        const int16_t *pcm = (const int16_t *)g_hdr[i].host.lpData;
+        uint32_t n = g_hdr[i].host.dwBufferLength / 2, nz = 0;
+        int32_t peak = 0;
+        for (uint32_t k = 0; k < n; k++) {
+            int32_t v = pcm[k];
+            if (v) nz++;
+            if (v < 0) v = -v;
+            if (v > peak) peak = v;
+        }
+        fprintf(stderr, "[wave] buffer: %u frames, peak %d, %u/%u non-zero\n",
+                n / 2, (int)peak, nz, n);
+    }
     MMRESULT r = waveOutWrite(hwo, &g_hdr[i].host, sizeof(WAVEHDR));
     WLOG("[wave] write %04X:%04X len=%u -> %u\n", seg, off,
          (unsigned)g_hdr[i].host.dwBufferLength, r);

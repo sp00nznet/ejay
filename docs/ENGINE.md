@@ -307,13 +307,60 @@ loaded, so the mixer is running on real data.
 settles the `AWaveDauer` reading: 604,800 at 44,100 Hz is 13.714 s, eight bars
 at 140 BPM.
 
-## What still gates the sound
+## AStart takes a length, and refuses zero
 
-`3964` is the function that sets the playing bit (`or byte ds:[0xA4], 0x2`)
-and calls the waveOut path. After a full pump with a sample loaded,
-`ds:[0xA4]` is still `00` and `ds:[0x1208]` is still `FFFF` (no device), so
-`3964` is never reached. It sits at the end of the eight-voice loop in
-`5D72`, which means the loop is not completing, or is not entered.
+`AStart`'s 4-byte argument is a length in samples, and the first thing it
+does is:
+
+```
+cmp dword ss:[bp+0x6], 0
+jle 5F67                  ; skip the whole setup
+```
+
+Called with 0 - which is what every run here did for a long time - it returns
+having set nothing, and the two limits `ATimer` checks stay zero. `ATimer`
+then exits before the eight-voice loop on:
+
+```
+if ([0x121A] > [0x3154]) return     position past the buffer
+if ([0x121A] > [0x8B0])  return     position past the song
+```
+
+With `AStart(2000000)` both limits clear the position counter, the loop runs,
+and `3964` finally opens the device.
+
+## The device opens
+
+```
+waveOutOpen dev=99  -> failed mmr=2        probing
+waveOutOpen dev=0 44100Hz 2ch 16bit -> ok
+prepare 0002:317A len=1587200 -> 0
+write   0002:317A len=1587200 -> 0
+```
+
+`ds:[0x1208]` goes from `FFFF` to `0001`: a live device handle. The header
+lives in DGROUP and its `lpData` points at the 1,587,712-byte block `AInit`
+reserved, so the engine is handing the driver its own mix buffer - about nine
+seconds of 44.1 kHz stereo.
+
+## But the buffer is silent
+
+A successful `waveOutWrite` says nothing about content, so the shim measures
+what it is actually handing over:
+
+```
+buffer: 396800 frames, peak 18770, 4/793600 non-zero
+```
+
+Four non-zero samples in 793,600. The peak is a real amplitude rather than a
+stuck bit, so something wrote *something*, but this is silence with four
+stray values in it - not audio. Pumping for six seconds produces one buffer
+and no more.
+
+So the whole chain is connected - index, load, decode entry, voice, device,
+queue - and the mixer is not rendering the loaded sample into the output
+block. That is the next thing to find, and it is the only thing left between
+here and sound.
 
 ## AWaveDauer reads a .PXD directly
 
