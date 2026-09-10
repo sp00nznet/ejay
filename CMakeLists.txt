@@ -16,6 +16,11 @@ endif()
 
 include_directories(runtime)
 
+# -DEJAY_TRACE=ON logs every Win16 and MMSYSTEM call the engine makes. It is
+# the only way to see what the engine is asking for, since it reports failure
+# as a zero in AX and nothing else.
+option(EJAY_TRACE "Log Win16 and MMSYSTEM calls" OFF)
+
 # The lifted engine: src/seg001.c plus the generated dispatch and stub files.
 file(GLOB SEGMENT_SOURCES CONFIGURE_DEPENDS src/*.c)
 if(SEGMENT_SOURCES)
@@ -33,6 +38,10 @@ file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS runtime/win16/*.c)
 if(RUNTIME_SOURCES)
     add_library(ejay_runtime STATIC ${RUNTIME_SOURCES})
     target_include_directories(ejay_runtime PRIVATE runtime)
+    if(EJAY_TRACE)
+        target_compile_definitions(ejay_runtime PRIVATE
+            EJAY_TRACE_WAVE EJAY_TRACE_WIN16)
+    endif()
 endif()
 
 # The host: stands in for DANCE.EXE, which is p-code and cannot be lifted.

@@ -125,26 +125,95 @@ static void list_exports(void) {
 }
 
 /* Set the guest up as if a Win16 host were about to make a far call into the
- * DLL: fresh stack, DGROUP in DS, and a far return address on top so the
- * callee's RETF has somewhere to land. */
+ * DLL: fresh stack, DGROUP in DS, and the arguments below a far return address
+ * so the callee's RETF has somewhere to land.
+ *
+ * Win16 PASCAL pushes arguments LEFT TO RIGHT, so the first argument ends up
+ * deepest and the last sits just above the return address. A DWORD goes
+ * high word first; a far pointer goes segment first. Both leave the low half
+ * at the lower address, which is what the shims read back. */
 static void enter_guest(CPU *cpu) {
     cpu->ds = cpu->es = EJAY_AUTO_DATA_SEG;
     cpu->ss = EJAY_STACK_SEG;
     cpu->sp = EJAY_STACK_SP;
     cpu->cs = EJAY_CODE_SEG;
+}
+
+static void push_retaddr(CPU *cpu) {
     push16(cpu, 0);            /* return CS: nothing to return to */
     push16(cpu, 0);            /* return IP */
+}
+
+/* Scratch guest memory for string arguments, handed out of the stack segment
+ * well below SP so a call cannot walk over it. */
+static uint16_t g_scratch = 0x0100;
+
+static void push_string(CPU *cpu, const char *text) {
+    uint16_t at = g_scratch;
+    for (size_t i = 0; ; i++) {
+        mem_write8(cpu, EJAY_STACK_SEG, (uint16_t)(at + i), (uint8_t)text[i]);
+        if (!text[i]) break;
+    }
+    g_scratch = (uint16_t)(at + strlen(text) + 1);
+    push16(cpu, EJAY_STACK_SEG);       /* segment first ... */
+    push16(cpu, at);                   /* ... then offset */
+}
+
+/* One argument token. Returns bytes pushed, or -1 on a token we cannot read.
+ *   123 / 0x7B   a WORD
+ *   d:123        a DWORD (high word first)
+ *   s:TEXT       a far pointer to TEXT, placed in guest memory */
+static int push_arg(CPU *cpu, const char *tok) {
+    if (!strncmp(tok, "s:", 2)) { push_string(cpu, tok + 2); return 4; }
+    if (!strncmp(tok, "d:", 2)) {
+        unsigned long v = strtoul(tok + 2, NULL, 0);
+        push16(cpu, (uint16_t)(v >> 16));
+        push16(cpu, (uint16_t)v);
+        return 4;
+    }
+    char *end = NULL;
+    unsigned long v = strtoul(tok, &end, 0);
+    if (end == tok || (end && *end)) return -1;
+    push16(cpu, (uint16_t)v);
+    return 2;
+}
+
+/* "AInit" or "AInit:1,s:BINP.PXD". Pushes the arguments, then the return
+ * address. Returns bytes of arguments pushed, or -1. */
+static int push_args(CPU *cpu, char *spec) {
+    char *colon = strchr(spec, ':');
+    int bytes = 0;
+    if (colon && (colon[1] == '\0')) colon = NULL;
+    /* s: and d: contain colons of their own, so split on the FIRST one only */
+    if (colon) {
+        *colon = '\0';
+        char *p = colon + 1;
+        while (*p) {
+            char *comma = strchr(p, ',');
+            if (comma) *comma = '\0';
+            int n = push_arg(cpu, p);
+            if (n < 0) { fprintf(stderr, "bad argument: %s\n", p); return -1; }
+            bytes += n;
+            if (!comma) break;
+            p = comma + 1;
+        }
+    }
+    push_retaddr(cpu);
+    return bytes;
 }
 
 int main(int argc, char **argv) {
     const char *img = EJAY_IMAGE_PATH;
     const char *dir = ".";
-    const char *call = NULL;
+    char *call[16];
+    int ncall = 0;
+    int ring = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dir") && i + 1 < argc) dir = argv[++i];
         else if (!strcmp(argv[i], "--image") && i + 1 < argc) img = argv[++i];
-        else call = argv[i];
+        else if (!strcmp(argv[i], "--ring")) ring = 40;
+        else if (ncall < 16) call[ncall++] = argv[i];
     }
 
     SetUnhandledExceptionFilter(crash_handler);
@@ -178,6 +247,7 @@ int main(int argc, char **argv) {
      * sees CX == 0 takes its jcxz path and skips LocalInit entirely, and then
      * runs with no local heap at all. */
     enter_guest(&cpu);
+    push_retaddr(&cpu);
     cpu.di = EJAY_AUTO_DATA_SEG;
     cpu.cx = EJAY_HEAP_SIZE;
     cpu.si = 0;
@@ -185,10 +255,26 @@ int main(int argc, char **argv) {
     printf("\nLibMain returned ax=%04X (%s)\n", cpu.ax,
            cpu.ax ? "success" : "FAILED - the DLL refused to initialise");
 
-    if (call) {
-        const EjayExport *e = find_export(call);
+    if (!ncall) {
+        list_exports();
+        cpu_free(&cpu);
+        return 0;
+    }
+
+    /* Each named export is a fresh far call into a DLL that is already
+     * initialised: the stack restarts, the engine's state in DGROUP does not.
+     * That is exactly how DANCE.EXE drove it, one Declare at a time. */
+    for (int i = 0; i < ncall; i++) {
+        char spec[256];
+        snprintf(spec, sizeof(spec), "%s", call[i]);
+        char name[64];
+        snprintf(name, sizeof(name), "%s", spec);
+        char *colon = strchr(name, ':');
+        if (colon) *colon = '\0';
+
+        const EjayExport *e = find_export(name);
         if (!e) {
-            fprintf(stderr, "no such export: %s\n", call);
+            fprintf(stderr, "no such export: %s\n", name);
             list_exports();
             cpu_free(&cpu);
             return 1;
@@ -199,13 +285,36 @@ int main(int argc, char **argv) {
             cpu_free(&cpu);
             return 1;
         }
-        printf("\ncalling %s (@%d) ...\n", e->name, e->ordinal);
-        fflush(stdout);
+
         enter_guest(&cpu);
+        int bytes = push_args(&cpu, spec);
+        if (bytes < 0) { cpu_free(&cpu); return 1; }
+        printf("\ncalling %s (@%d) with %d bytes of arguments ...\n",
+               e->name, e->ordinal, bytes);
+        fflush(stdout);
+
+        uint16_t sp_before = cpu.sp;
+        unsigned ring_at = g_fn_ring_pos;
         e->fn(&cpu);
-        printf("%s returned ax=%04X dx=%04X\n", e->name, cpu.ax, cpu.dx);
-    } else {
-        list_exports();
+        if (ring) {
+            /* The lifted functions this call actually went through. There is
+             * no other backtrace: the guest call stack lives in cpu->mem. */
+            unsigned n = g_fn_ring_pos - ring_at;
+            printf("  %u lifted calls; last %d:\n", n, ring < (int)n ? ring : (int)n);
+            for (int k = (ring < (int)n ? ring : (int)n); k >= 1; k--)
+                printf("    %s\n",
+                       g_fn_ring[(g_fn_ring_pos - (unsigned)k) & (EJAY_FN_RING_SIZE - 1)]);
+        }
+        printf("%s returned ax=%04X dx=%04X", e->name, cpu.ax, cpu.dx);
+        /* A PASCAL callee pops the return address and its own arguments, so SP
+         * must come back exactly 4 + bytes higher. Anything else means a purge
+         * somewhere was wrong, and in a real host the caller's frame would
+         * have been the next casualty. */
+        uint16_t expect = (uint16_t)(sp_before + 4 + bytes);
+        if (cpu.sp != expect)
+            printf("   *** sp %04X, expected %04X (off by %d) ***",
+                   cpu.sp, expect, (int)(int16_t)(cpu.sp - expect));
+        printf("\n");
     }
 
     cpu_free(&cpu);

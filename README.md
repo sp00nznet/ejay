@@ -15,36 +15,66 @@ alongside the same-era Win16/Win32 arc of DinoPark Tycoon (1993), El-Fish
 
 ## Status
 
-**The 1997 engine initialises.** `DANCE02.DLL` is lifted whole - 30,904 bytes
-of 16-bit machine code into 1,244 C functions - and its `LibMain` runs to
-completion in recompiled code. Four of its exports have been called and answer:
+**The 1997 engine initialises and runs.** `DANCE02.DLL` is lifted whole -
+30,904 bytes of 16-bit machine code into 1,244 C functions - `LibMain`
+succeeds, and `AInit` executes 2,822 lifted functions on its way through the
+engine's startup into `InterStart`.
 
 ```
-LibMain returned ax=0100 (success)
+LibMain returned ax=0001
 
-  AGetTime  ax=0000      no playback in progress
-  AGetFree  ax=0000      no free voices yet
-  AGetFull  ax=0001
-  ALautGet  ax=00FA      master volume, 250
+  AGetTime  ax=0000
+  AGetFree  ax=0000
+  AGetFull  ax=0000
+  AInit     ax=0000     runs 2,822 lifted functions, reaches InterStart
+  ADevice   ax=0003     the number of wave-out devices on this machine
 ```
 
-`ALautGet` reaches `waveOutGetVolume` on its way out, which means control is
-crossing the whole stack: lifted 1997 code, into the Win16 shim, into Win32.
+`ADevice` counts the host's real audio devices, so control crosses the whole
+stack: lifted 1997 code, the Win16 shim, Win32. 56 of the 60 imports are
+implemented, including the whole waveOut/waveIn/aux surface, and every call
+returns with the stack exactly balanced.
 
-Nothing is audible yet - the `waveOut` family is still stubbed. See
-[RECON](docs/RECON.md) for the teardown the plan is built on.
+Nothing is audible yet. `AInit` still returns 0, and until it succeeds the
+engine will not open a device. See [RECON](docs/RECON.md) for the teardown.
 
 | | |
 |---|---:|
 | Code lifted | 30,904 of 30,904 bytes - **100%** |
 | Functions | 1,244 |
 | Entry points recovered by name | 33 of 34 |
-| Lines of generated C | 30,700 |
-| Win16 imports bridged | 32 hand-written, 28 stubbed |
+| Argument sizes recovered | 33 of 34 |
+| Win16 imports implemented | 56 of 60 |
 | Unresolved call targets | 1 |
 
-The one unresolved target is `___EXPORTEDSTUB`, a Borland helper whose entry
-point does not land on an instruction boundary. Nothing calls it.
+The four unimplemented imports are `sndPlaySound` and the three absolute-value
+imports, which are patched into the code stream and never called. The one
+unresolved call target is `___EXPORTEDSTUB`, a Borland helper nothing calls.
+
+### Two bugs worth naming
+
+Both were silent, and both were found by making the harness check something
+rather than by reading code.
+
+**Half the far calls went to the wrong place.** A far call in an NE binary can
+carry either of two fixups, and they do not mean the same thing: a `FAR_PTR`
+fixup supplies offset *and* segment, while a `SELECTOR` fixup patches only the
+segment word and leaves the offset in the instruction. The lifter took the
+relocation's offset for both, and a `SELECTOR` relocation reports offset 0 - so
+**154 of 319 far calls** jumped to offset 0 of the code segment. That is a real
+function, so they ran and returned instead of crashing, and `LibMain` reported
+success the whole time. `AInit` was three such calls and a return.
+
+**72 constants were fixup chain links.** `__AHINCR` and `__AHSHIFT` are not
+routines: the loader patches a value into the code stream at every site. Left
+alone, each site keeps what the file held, which for a chained fixup is the
+offset of the *next* site - a small, plausible number. `add ax, __AHINCR`,
+which walks a huge pointer to the next 64 KB tile, was adding 0x1B96 tiles.
+Nothing would have shown it until the first sample larger than 64 KB, which is
+every sample worth playing.
+
+The stack-balance check in the harness came out of the same instinct and
+immediately caught the test itself calling three exports with an empty stack.
 
 ## The finding
 

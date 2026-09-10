@@ -9,8 +9,9 @@ Two checks, both cheap:
    DS from the wrong slot. The damage lands somewhere else entirely, which is
    why this is checked statically rather than waited for.
 
-2. The built harness runs LibMain and gets a non-zero AX back, and the
-   zero-argument exports return without taking the process down.
+2. The built harness runs LibMain and gets a non-zero AX back, and a handful
+   of exports return with the stack exactly balanced - which is the one
+   observable that catches a wrong purge anywhere on the path.
 
     python tools/test_engine.py
 """
@@ -59,15 +60,31 @@ def test_libmain_initialises():
     print(f'  LibMain ax={ax}')
 
 
-def test_zero_arg_exports_return():
-    # These four take no arguments, so they can be called with nothing pushed
-    # and still be asked a fair question. AGetFull reports whether the engine
-    # has samples loaded; ALautGet reads the master volume back.
-    for name in ('AGetTime', 'AGetFree', 'AGetFull', 'ALautGet'):
-        r = run(name)
+# Argument sizes come from each callee's own RETF, read out of the binary by
+# IDA (work/argsize.json). Calling one with the wrong number of bytes is not a
+# harmless mistake: the callee pops what it was compiled to pop, so the stack
+# comes back shifted by the difference - which is how this list was wrong the
+# first time it was written.
+CALLS = [
+    ('AGetTime', 'AGetTime'),        # 0 bytes
+    ('AGetFree', 'AGetFree:d:0'),    # 4
+    ('AGetFull', 'AGetFull:d:0'),    # 4
+    ('ALautGet', 'ALautGet:d:0'),    # 4
+    ('AInit',    'AInit:1'),         # 2
+    ('ADevice',  'ADevice:d:0'),     # 4
+]
+
+
+def test_exports_return_and_balance_the_stack():
+    for name, spec in CALLS:
+        r = run(spec)
         assert r.returncode == 0, f'{name} exited {r.returncode}\n{r.stdout}{r.stderr}'
         assert f'{name.upper()} returned ax=' in r.stdout, r.stdout + r.stderr
-        print(f'  {name}: ' + r.stdout.split(f'{name.upper()} returned ')[1].strip())
+        line = r.stdout.split(f'{name.upper()} returned ')[1].split('\n')[0].strip()
+        # The whole PASCAL purge story in one assertion: a callee must leave SP
+        # exactly 4 + argbytes higher than it found it.
+        assert '***' not in line, f'{name} unbalanced the stack: {line}'
+        print(f'  {name}: {line}')
 
 
 if __name__ == '__main__':
@@ -76,5 +93,5 @@ if __name__ == '__main__':
         print(f'  {EXE} not built - skipping the runtime checks')
         sys.exit(0)
     test_libmain_initialises()
-    test_zero_arg_exports_return()
+    test_exports_return_and_balance_the_stack()
     print('ok')

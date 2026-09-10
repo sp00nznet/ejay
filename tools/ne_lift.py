@@ -30,7 +30,7 @@ from lift16 import Lifter, _read, _write, _reg16, _sreg, _mem_addr, _label
 from ne_parse import parse_ne, NEHeader, Segment
 from ne_decode import disassemble_segment, build_reloc_map
 from fpu_decode import decode_fpu, format_fpu
-from win16 import get_import, module_name, is_fpu_module
+from win16 import get_import, module_name, is_fpu_module, get_value
 
 
 class NELifter(Lifter):
@@ -63,7 +63,27 @@ class NELifter(Lifter):
                     if r.target_seg > 0 and r.target_seg != 0xFF:
                         target = self.seg_by_index.get(r.target_seg)
                         if target is not None and target.is_code:
-                            return f'seg{r.target_seg:03d}_{r.target_off:04X}'
+                            # Two different fixups land on a far call and they
+                            # do NOT carry the same information:
+                            #
+                            #   FAR_PTR  (src_type 3) patches offset AND
+                            #            segment, so r.target_off is the real
+                            #            target.
+                            #   SELECTOR (src_type 2) patches only the SEGMENT
+                            #            word. The offset is already in the
+                            #            instruction, and r.target_off is 0.
+                            #
+                            # Taking r.target_off for both sent every
+                            # SELECTOR-fixed call to offset 0 of the segment -
+                            # a real function, so it ran and returned rather
+                            # than crashing. In DANCE02 that was 154 of 319 far
+                            # calls, including the ones AInit makes.
+                            if (r.src_type == 2 and inst.op1 is not None
+                                    and inst.op1.type == OpType.FAR):
+                                off16 = inst.op1.disp & 0xFFFF
+                            else:
+                                off16 = r.target_off & 0xFFFF
+                            return f'seg{r.target_seg:03d}_{off16:04X}'
                         else:
                             return f'/* data ref seg{r.target_seg}:{r.target_off:04X} */'
                 elif target_type in (1, 2):  # Import by ordinal / by name
@@ -110,7 +130,57 @@ class NELifter(Lifter):
         xm = self.xmod.get(mod.upper())
         if xm and r.ordinal in xm:
             return xm[r.ordinal][1] & 0xFFFF
+        # Absolute-value imports: __AHINCR, __AHSHIFT, __WINFLAGS. The loader
+        # patches a value in at every site, so there is nothing to call and no
+        # stub is ever reached. Left unresolved, the immediate keeps whatever
+        # was in the file - which for a chained fixup is the offset of the NEXT
+        # site, a small plausible number that silently breaks huge-pointer
+        # arithmetic on anything over 64 KB.
+        val = get_value(mod, get_import(mod, r.ordinal).api)
+        if val is not None:
+            return val & 0xFFFF
         return None
+
+    def _resolve_imm_value(self, inst, m, op1, op2):
+        """Apply a relocation sitting on an IMMEDIATE by rewriting the
+        immediate, instead of replacing the whole instruction.
+
+        The mov/push path further down replaces the instruction with the value,
+        which is right only when producing the value IS the instruction's whole
+        job. Borland also emits __AHINCR straight into arithmetic:
+
+            mov ax, es ; add ax, __AHINCR ; mov es, ax
+
+        and there the `add` has to stay an add - replacing it would turn
+        `ax += 1` into `ax = 1`. So this rewrites the operand and lets the
+        normal path emit the instruction with the right constant.
+
+        Left unhandled, that site kept the value the file had, which for a
+        chained fixup is the offset of the NEXT site in the chain: a small,
+        plausible number. The selector then jumped thousands of tiles instead of
+        one, and only on data past 64 KB - which for a sampler is every sample
+        worth playing."""
+        if m == 'push' or (m == 'mov' and op2 is not None
+                           and op2.type in (OpType.IMM8, OpType.IMM16)):
+            return False              # the replacement path below owns these
+        immop = None
+        if op2 is not None and op2.type in (OpType.IMM8, OpType.IMM16):
+            immop = op2
+        elif op2 is None and op1 is not None and op1.type in (OpType.IMM8, OpType.IMM16):
+            immop = op1
+        if immop is None:
+            return False
+        imm_at = self._imm_start(inst, m, op1, op2)
+        if imm_at is None:
+            return False
+        ann = self._get_reloc_at(imm_at)
+        if not ann:
+            return False
+        val = self._reloc_offset_value(ann.reloc)
+        if val is None:
+            return False
+        immop.disp = val
+        return True
 
     def _resolve_mem_disp(self, inst, m, op1, op2):
         """Apply a relocation sitting on a direct [disp16] memory operand.
@@ -153,6 +223,10 @@ class NELifter(Lifter):
 
         # A fixup on a direct memory displacement must land on the ADDRESS.
         self._resolve_mem_disp(inst, m, op1, op2)
+
+        # A fixup on an immediate that arithmetic consumes must land on the
+        # VALUE, with the arithmetic left alone.
+        self._resolve_imm_value(inst, m, op1, op2)
 
         # --- FWAIT / NOP are no-ops in our model ---
         # CATZ uses real x87 instructions (not inline FP-emulation trampolines
