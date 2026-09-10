@@ -171,6 +171,22 @@ static void pcm_summary(CPU *cpu, uint16_t sel, uint32_t len)
     printf("  sel %04X: %u/%u non-zero, peak %d\n", sel, nz, n, (int)peak);
 }
 
+/* Scan the whole flat image for the .PXD magic. The loader computes where
+ * to put the file through huge-pointer arithmetic, and the parser computes
+ * where to read it the same way; if those two disagree the file is simply
+ * not where anyone looks. Reporting the flat offset settles it. */
+static void find_magic(CPU *cpu)
+{
+    static const uint8_t MAGIC[4] = { 0x74, 0x50, 0x78, 0x44 };   /* tPxD */
+    unsigned hits = 0;
+    for (uint32_t a = 0; a + 4 <= cpu->mem_size; a++) {
+        if (memcmp(cpu->mem + a, MAGIC, 4) != 0) continue;
+        printf("  tPxD at flat %u (0x%X)\n", a, a);
+        if (++hits >= 8) break;
+    }
+    if (!hits) printf("  tPxD not present anywhere in guest memory\n");
+}
+
 /* Set the guest up as if a Win16 host were about to make a far call into the
  * DLL: fresh stack, DGROUP in DS, and the arguments below a far return address
  * so the callee's RETF has somewhere to land.
@@ -263,6 +279,7 @@ int main(int argc, char **argv) {
     uint16_t dump_off = 0, dump_len = 0;
     int pump_ms = 0;
     int volume = 20;               /* percent; bring-up runs stay quiet */
+    int magic = 0;
     uint16_t pcm_sel[8]; uint32_t pcm_len = 0; int npcm = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -279,6 +296,7 @@ int main(int argc, char **argv) {
             pcm_sel[npcm++] = (uint16_t)strtoul(argv[++i], NULL, 0);
             pcm_len = strtoul(argv[++i], NULL, 0);
         }
+        else if (!strcmp(argv[i], "--magic")) magic = 1;
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc)
             volume = (int)strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--pump") && i + 1 < argc)
@@ -426,6 +444,7 @@ int main(int argc, char **argv) {
             }
         }
         printf("%u ticks, %u lifted calls\n", ticks, g_fn_ring_pos - before);
+        if (magic) find_magic(&cpu);
         if (dump_len) dump_range(&cpu, dump_off, dump_len);
         for (int k = 0; k < npcm; k++) pcm_summary(&cpu, pcm_sel[k], pcm_len);
         for (int k = 0; k < npeek; k++)
