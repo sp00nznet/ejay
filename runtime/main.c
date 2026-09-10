@@ -426,6 +426,7 @@ int main(int argc, char **argv) {
             }
         }
         printf("%u ticks, %u lifted calls\n", ticks, g_fn_ring_pos - before);
+        if (dump_len) dump_range(&cpu, dump_off, dump_len);
         for (int k = 0; k < npcm; k++) pcm_summary(&cpu, pcm_sel[k], pcm_len);
         for (int k = 0; k < npeek; k++)
             printf("  ds:[%04X] = %02X  %04X  %08X\n", peek[k],
