@@ -19,6 +19,12 @@ alongside the same-era Win16/Win32 arc of DinoPark Tycoon (1993), El-Fish
 sample, streams it to a real sound card at 22,050 Hz, and animates its playback
 cursor in a window - at the same time, out of recompiled 16-bit machine code.
 
+![Dance eJay running, recompiled](docs/img/ejay1-running.png)
+
+*The 1997 interface with the recompiled engine behind it: the playback cursor
+stepping across the eight-track grid while the intro streams to the sound card.
+The background is loaded at runtime from the user's own disc with `--bg`.*
+
 ![The playback cursor](docs/img/cursor.png)
 
 *The engine's entire user interface: a one-pixel cursor stepping across the
@@ -270,6 +276,15 @@ python ../tools/tools/pe/pe_analyze.py original/ejay2/D_ejay2/ejay/Dancejay.exe
 ```
 
 Nothing builds yet. This section grows as the phases land.
+
+## About the screenshots
+
+The images above show this project running, to record that it works. Dance eJay
+and its interface artwork are the property of their rights holders - PXD
+Musicsoft / Fast Trak / eJay AG - and nothing here claims otherwise, nor is any
+of it redistributed: the background is read at runtime from a disc you supply,
+and the repository contains no game files. Same posture as the other recomp
+projects here.
 
 ## Legal
 
