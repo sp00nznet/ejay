@@ -389,6 +389,31 @@ render.bmp: 2,798 white pixels across 31 distinct columns, x = 1..31
 at successive x positions - the playback cursor advancing. `--shot <file>`
 saves the memory DC as a BMP, so "it renders" is a file rather than a count.
 
+## AExport renders to a WAV
+
+`AExport(far char *path, DWORD length)` is an offline render. It opens the
+file, writes a real RIFF/WAVE header, and follows it with `length` bytes of
+PCM. The file size tracks the argument exactly:
+
+| length | file |
+|---:|---:|
+| 604,800 | 604,844 |
+| 44,100 | 44,144 |
+| 100 | 144 |
+
+The header it writes is PCM, 2 channels, 44,100 Hz, 176,400 bytes/sec,
+16-bit - the same format `3660` asks `waveOutOpen` for.
+
+The PCM is silence: 4 non-zero samples in 302,400, peak 18,770, the same
+values the live device buffer carries in every run.
+
+That is a useful result rather than a disappointment. It is a second,
+completely independent output path - a file, with no driver, no timing and no
+WAVEHDR translation - and it produces byte-identical silence. So the fault is
+upstream of both paths, in the decode, and not in anything the runtime does.
+It also gives a deterministic harness for the decode work: render a fixed
+length to a file and read it back.
+
 ## Why it is still silent
 
 Arming the selector write-watch in cpu.h settles what the call graph could
