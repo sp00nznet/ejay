@@ -125,6 +125,8 @@ void ejay_video_pump(void);
 void ejay_video_close(void);
 int  ejay_video_blits(void);
 int  ejay_video_save(const char *path);
+int  ejay_video_background(const char *path);
+void ejay_video_restore(void);
 void ejay_wave_dump(const char *path);
 void ejay_wave_dump_close(void);
 
@@ -374,6 +376,7 @@ int main(int argc, char **argv) {
     const char *shot = NULL;
     const char *wav = NULL;
     const char *sortlist = NULL;
+    const char *bg = NULL;
     int hot = 0;
     int unstick = 0;
     unsigned wsel = 0;
@@ -399,6 +402,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--unstick")) unstick = 1;
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav = argv[++i];
         else if (!strcmp(argv[i], "--sortlist") && i + 1 < argc) sortlist = argv[++i];
+        else if (!strcmp(argv[i], "--bg") && i + 1 < argc) { bg = argv[++i]; window = 1; }
         else if (!strcmp(argv[i], "--hot")) hot = 1;
         else if (!strcmp(argv[i], "--window")) window = 1;
         else if (!strcmp(argv[i], "--magic")) magic = 1;
@@ -418,8 +422,9 @@ int main(int argc, char **argv) {
     ejay_set_test_volume(volume);
     if (wav) ejay_wave_dump(wav);
     g_wsel = (uint16_t)wsel;      /* arms cpu.h EJAY_SELW on guest writes */
-    if (window && !ejay_video_open(640, 200))
+    if (window && !ejay_video_open(640, 480))
         fprintf(stderr, "could not open a window; drawing goes nowhere\n");
+    if (bg) ejay_video_background(bg);
 
     CPU cpu;
     cpu_init(&cpu);
@@ -567,6 +572,7 @@ int main(int argc, char **argv) {
                  * control of its own. Both have to run, or the engine keeps
                  * time and never queues a buffer. */
                 if (atimer && atimer->fn) {
+                    ejay_video_restore();     /* the host owns the background */
                     enter_guest(&cpu);
                     push_retaddr(&cpu);
                     atimer->fn(&cpu);

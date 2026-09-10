@@ -26,6 +26,8 @@
 
 static HWND  g_wnd;
 static HDC   g_memdc;          /* what the engine paints into */
+static HDC   g_bgdc;           /* a pristine copy, to erase from */
+static HBITMAP g_bgbmp;
 static HBITMAP g_bmp, g_oldbmp;
 static int   g_w = 640, g_h = 200;
 static int   g_blits;
@@ -78,6 +80,49 @@ int ejay_video_open(int width, int height)
     ShowWindow(g_wnd, SW_SHOW);
     UpdateWindow(g_wnd);
     return 1;
+}
+
+/* Load a background into the memory DC, so the cursor is drawn where it
+ * actually belongs instead of onto black. The bitmap comes off the user's own
+ * disc at runtime - none of it is redistributed with this project. */
+int ejay_video_background(const char *path)
+{
+    if (!g_memdc) return 0;
+    HBITMAP bg = (HBITMAP)LoadImageA(NULL, path, IMAGE_BITMAP, 0, 0,
+                                     LR_LOADFROMFILE | LR_CREATEDIBSECTION);
+    if (!bg) { fprintf(stderr, "[gdi] cannot load background %s\n", path); return 0; }
+    HDC src = CreateCompatibleDC(g_memdc);
+    HBITMAP old = (HBITMAP)SelectObject(src, bg);
+    BITMAP bm;
+    GetObject(bg, sizeof(bm), &bm);
+    BitBlt(g_memdc, 0, 0, bm.bmWidth, bm.bmHeight, src, 0, 0, SRCCOPY);
+    /* Keep a pristine copy too. The engine's BitBlt source is meant to be a
+     * clean background DC it erases the cursor from; without one the cursor
+     * accumulates into a solid bar instead of moving. */
+    if (g_bgdc) { DeleteDC(g_bgdc); g_bgdc = NULL; }
+    if (g_bgbmp) { DeleteObject(g_bgbmp); g_bgbmp = NULL; }
+    {
+        HDC wdc = GetDC(g_wnd);
+        g_bgdc = CreateCompatibleDC(wdc);
+        g_bgbmp = CreateCompatibleBitmap(wdc, g_w, g_h);
+        SelectObject(g_bgdc, g_bgbmp);
+        BitBlt(g_bgdc, 0, 0, bm.bmWidth, bm.bmHeight, src, 0, 0, SRCCOPY);
+        ReleaseDC(g_wnd, wdc);
+    }
+    SelectObject(src, old);
+    DeleteDC(src);
+    DeleteObject(bg);
+    fprintf(stderr, "[gdi] background %s (%ldx%ld)\n", path, bm.bmWidth, bm.bmHeight);
+    return 1;
+}
+
+/* Repaint the background. The engine draws its cursor and never erases the
+ * previous one - in 1997 the VB form owned the surface and repainted it. Doing
+ * that here is the host's job, not a workaround: without it the cursor
+ * accumulates into a solid bar instead of moving. */
+void ejay_video_restore(void)
+{
+    if (g_memdc && g_bgdc) BitBlt(g_memdc, 0, 0, g_w, g_h, g_bgdc, 0, 0, SRCCOPY);
 }
 
 void ejay_video_pump(void)
@@ -175,7 +220,8 @@ void GDI_BITBLT(CPU *cpu)
              * restoring part of itself. Self-copy is the honest reading of
              * that; a real second surface would need a handle table.
              * ponytail: self-copy. Revisit when the host owns two DCs. */
-            BitBlt(g_memdc, x, y, w, h, g_memdc, xsrc, ysrc, SRCCOPY);
+            BitBlt(g_memdc, x, y, w, h, g_bgdc ? g_bgdc : g_memdc,
+                   xsrc, ysrc, SRCCOPY);
         } else {
             static int moaned;
             if (!moaned++)

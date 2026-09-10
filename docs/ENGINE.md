@@ -401,6 +401,36 @@ fourth is the span it moves across.
 The credits panel names Bernhard Throll, which is the same name stamped inside
 `DANCE02.DLL`'s own non-resident name table.
 
+## Placing the cursor on the grid
+
+The grid rectangle can be measured out of the background artwork rather than
+guessed: the dark field in the upper half runs **x 49..597, y 16..284**, with
+lane separators every ~25 px between y 63 and y 238 - eight lanes, and the
+strip above them at y 16..30 is the position bar.
+
+That gives `ABilder` its arguments directly:
+
+| argument | DGROUP | value | meaning |
+|---|---|---:|---|
+| 4th dword | `ds:[0x1860]` | 549 | the span the cursor crosses (and the draw gate) |
+| 5th | `ds:[0x314E]` | 49 | x origin - the grid's left edge |
+| 6th | `ds:[0x3146]` | 30 | y - the top lane |
+| 7th | `ds:[0x1864]` | 252 | height - down to the last lane |
+
+Measured back off the rendered frame, the engine draws at **x 88-89, y 30..281,
+height 252**: a two-pixel cursor spanning all eight lanes, in the right place.
+
+Two things were needed to get there, and both are the host's job rather than
+the engine's:
+
+- **A window the size of the artwork.** At 640x200 the cursor was clipped to
+  170 rows and looked like a placement error; the screen is 640x480.
+- **Repainting the background.** The engine draws its cursor and never erases
+  the previous one, so without a repaint it accumulates into a solid bar - 104
+  columns of it. In 1997 the VB form owned the surface and repainted it.
+  `--bg` loads the background from the user's own disc and the host restores it
+  each tick, which is what turns a smear into a moving line.
+
 ## It renders
 
 `ATimer` reaches the drawing code in two hops, and it is pumped every tick -
