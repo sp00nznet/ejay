@@ -95,17 +95,36 @@ ASetPfad(dir) → AStop → AMitte(0,0) → RWaveParam(60, 0x6666) → ASetFader
   are 8 (track), 9 (start, in samples at 44,100 - `AStart`'s 0xA17FC0 is four
   minutes in the same unit) and 6 (a status word the engine writes into).
 
-- **The library.** eJay 2's samples ship on its second disc, which this one is
-  not. eJay 1's are here, and the 1999 engine opens, decodes and plays a 1996
-  `tPxD` sample without being asked to do anything special about it - 1,352 of
-  them. Each carries its own two-line name in its header, which is exactly the
-  pair of strings `GFX_SampleZeichne` wants for a block label and what the
-  browser lists.
+- **The library, and the browser.** eJay 2's samples ship on its second disc,
+  which this one is not. eJay 1's are here, and the 1999 engine opens, decodes
+  and plays a 1996 `tPxD` sample without being asked to do anything special
+  about it - 1,352 of them.
+
+  It does not have to be found by walking the disc, either: `DMACHINE\PXD.TXT`
+  is the index - nine `(start, count)` pairs for the sound groups, then four
+  fields per sample (size, length in bars, and the two lines of its name) - and
+  `MAX.TXT` is the matching list of paths. The two name fields are exactly the
+  pair `GFX_SampleZeichne` wants for a block label, and the bar count is the
+  block's width, so one record feeds both the browser row and the grid.
+
+  The browser works from it: the category buttons switch sound group, the wheel
+  and the scroll strip move the list, a click selects, and a double click places
+  the sample - into the first lane with room at the bar the cursor is on, live,
+  through `APlay`, and drawn into the grid in the same pass. Which is the
+  gesture eJay's own tooltip describes: *"double click for play back of a
+  sample, move a sample to one of the tracks"*.
 
 ```
 host32/build.bat host32/ejay2.c host32/ejay2.exe
 cd <the ejay folder>
-ejay2.exe --song --lib <eJay 1 DANCE folder> --volume 3 --ticks 600
+ejay2.exe --song --lib <eJay 1 DANCE folder> --volume 3 --ticks 0
+```
+
+`--ticks 0` keeps the window up until you close it, which is the only way to
+click anything. `--selftest` checks the browser's hit-testing and scroll clamp
+without a mouse.
+
+```
 ```
 
 None of it was reachable until `Dancejay.exe` gave up its call sites. It is VB5
@@ -127,12 +146,12 @@ drawing its 24 VU elements - those want coordinates registered first through
 `GFX_IntroSetKey`, whose eleven arguments are exactly a control name plus the
 ten numbers `K_640` gives it.*
 
-Still to do: the button states cut from `EJAY02`, the twelve `B_GRUPPE_*`
-category buttons that filter the browser (Loop, Drum, Bass, Guitar, Seq, Layer /
-Rap, Voice, Effect, Xtra, GrooveG, Wave), and the `GFX_IntroSetKey` layout pass
-that unsticks the loading screen. The status word `APlay` is handed still never
-moves off 99 even though the sample plays, so something is expected to read it
-that nothing here does yet.
+Still to do: the pressed and hover states for the buttons, which are cut from
+`EJAY02` and need the `K_640` coordinate table read properly; dragging a block
+along its lane rather than only dropping it; and the `GFX_IntroSetKey` layout
+pass that unsticks the loading screen. The status word `APlay` is handed still
+never moves off 99 even though the sample plays, so something is expected to
+read it that nothing here does yet.
 
 **The 1997 engine initialises and runs.** `DANCE02.DLL` is lifted whole -
 30,904 bytes of 16-bit machine code into 1,244 C functions - `LibMain`

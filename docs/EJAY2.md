@@ -219,6 +219,48 @@ Risk" 00 ...
 what fills the browser. Some names begin with the separator and most carry
 stray control bytes, so they need trimming before they render.
 
+## The library index, and a browser that works
+
+eJay does not walk its own disc looking for samples. It ships an index, and
+decoding it is the difference between a browser with names in it and a browser
+that does something.
+
+```
+DMACHINE\PXD.TXT   18 quoted numbers, then four quoted fields per sample:
+                   size, length in bars, name line 1, name line 2
+DMACHINE\MAX.TXT   one quoted path per sample, same order: "baaaf.pxd"
+                   (MIN.TXT is the same list for a minimal install)
+```
+
+The 18 leading numbers are nine `(start, count)` pairs, and they add up to
+exactly the 1,352 records that follow:
+
+| group | start | count | what is in it |
+|---:|---:|---:|---|
+| 0 | 0 | 126 | `Grp. 1 / Vers1` ... |
+| 1 | 126 | 114 | `Sharp *` |
+| 2 | 240 | 115 | `Myth * L / Cut 1` |
+| 3 | 355 | 100 | |
+| 4 | 455 | 81 | |
+| 5 | 536 | 300 | `Clap / 01 L` - percussion |
+| 6 | 836 | 229 | |
+| 7 | 1065 | 127 | |
+| 8 | 1192 | 160 | `Here I am / 01` - vocals |
+
+Nine sound groups, which is what eJay 1's tooltip calls them and what the
+category buttons switch between. eJay 2's chrome has twelve (`B_GRUPPE_01`..`12`
+- Loop, Drum, Bass, Guitar, Seq, Layer down the left, Rap, Voice, Effect, Xtra,
+GrooveG, Wave down the right), so nine of them do something against this library
+and three stay dark.
+
+The two name fields are the pair `GFX_SampleZeichne` wants for a block label,
+and the bar count is the block's width. So the index gives the browser its rows
+and the grid its geometry from the same record.
+
+Geometry measured off `EJAY01A`: the panel at x 176..539, y 366..472; the button
+lozenges 49 wide at x 112 and x 569, 16 tall, on a 22-pixel pitch from y 346;
+the scroll strip at x 543.
+
 ## GFX_IntroRefresh takes a timestamp## GFX_IntroRefresh takes a timestamp
 
 Not a page number. The DLL compares its argument against 0xd48, 0xfb9, 0x1770,

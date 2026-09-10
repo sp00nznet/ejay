@@ -74,6 +74,16 @@ static ALOADREC g_screen, g_sheet;
  * rather than to the bare chrome, or it would wipe the arrangement as it
  * swept across. */
 static HDC g_canvas;
+/* set by the window procedure, acted on by the main loop */
+static int g_dirty = 1;
+static int g_place = -1;
+/* the graphics DLL handles the grid is drawn with, and the engine call that
+ * places a sample - both needed again whenever the arrangement changes */
+static fn_zeich g_zeich;
+static fn_aplay g_aplay;
+static int g_griddc;
+static int g_tex[3];
+static double g_cursor_frac;
 static fn_i_v  g_dplayupd;
 
 static FARPROC need(HMODULE h, const char *name)
@@ -82,6 +92,10 @@ static FARPROC need(HMODULE h, const char *name)
     if (!p) printf("  ! %s not found\n", name);
     return p;
 }
+
+/* Defined below, with the browser it belongs to: returns 1 if it consumed
+ * the message. */
+static int browser_input(UINT m, WPARAM w, LPARAM l);
 
 /* ---- the window the graphics DLL draws into ---------------------------- */
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
@@ -97,6 +111,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         EndPaint(h, &ps);
         return 0;
     }
+    if (browser_input(m, w, l)) return 0;
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcA(h, m, w, l);
 }
@@ -112,6 +127,7 @@ static HWND make_window(int cx, int cy)
      * into it, so letting Windows erase on every invalidation would wipe the
      * DLL's output between frames. */
     wc.hbrBackground = NULL;
+    wc.style = CS_DBLCLKS;      /* or WM_LBUTTONDBLCLK never arrives */
     wc.lpszClassName = "ejay2_host";
     RegisterClassA(&wc);
     RECT r = { 0, 0, cx, cy };
@@ -214,89 +230,109 @@ static void peek(const char *when)
            *(short *)(b + 0x39DA4));  /* 0 play, 1 export, 2 record         */
 }
 
-/* ---- the sample library --------------------------------------------------
- * A .PXD carries its own name in its header: "tPxD", then a NUL-terminated
- * string, and eJay writes it as two lines - "Snare Beat
-Risk", "Perc.L
-Vers10"
- * - which is exactly the pair of strings GFX_SampleZeichne wants for a block
- * label. So the library is self-describing and needs no index file, which is
- * just as well because there is not one.
+/* ---- the sample library ---------------------------------------------------
+ * eJay does not walk its own disc looking for samples - it ships an index, and
+ * decoding it is the difference between a browser with names in it and a
+ * browser that works.
  *
- * Dance eJay 2's own library ships on its second disc. eJay 1's is on ours, and
- * the two engines share the format - the 1999 engine opens, decodes and plays a
- * 1996 sample without being asked to do anything special about it.
+ *   DMACHINE\PXD.TXT   18 quoted numbers, then four quoted fields per sample:
+ *                      size, length in bars, name line 1, name line 2.
+ *                      The 18 numbers are nine (start, count) pairs - the nine
+ *                      sound groups the category buttons switch between, and
+ *                      they add up to exactly the 1,352 records that follow.
+ *   DMACHINE\MAX.TXT   one quoted path per sample, same order: "ba\aaaf.pxd".
+ *                      MIN.TXT is the same list for a minimal install.
+ *
+ * eJay 2's library is on its second disc. This is eJay 1's, and the 1999 engine
+ * plays it without being asked to do anything special about it.
  */
 typedef struct {
     char path[MAX_PATH];
-    char l1[24], l2[24];
+    char l1[28], l2[28];
+    int  bars;
 } SAMPLE;
 
-static SAMPLE g_lib[512];
+#define MAX_GROUPS 12
+static SAMPLE g_lib[1400];
 static int    g_lib_n;
+static int    g_grp_start[MAX_GROUPS], g_grp_count[MAX_GROUPS], g_grp_n;
 
-/* Names in the header are two lines separated by a newline, but not tidily:
- * some start with the separator (one-line names), and they carry stray control
- * characters that render as boxes. Trim, and promote a lone second line. */
-static void tidy(char *t)
+/* browser state */
+static int g_group  = 0;    /* which sound group is showing   */
+static int g_scroll = 0;    /* first visible row within it    */
+static int g_sel    = -1;   /* absolute index of the selection */
+
+/* Pull the next "quoted" field out of a buffer. */
+static const char *next_field(const char *p, char *out, size_t n)
 {
-    size_t a = 0, b;
-    while (t[a] && (unsigned char)t[a] < 32) a++;
-    if (a) memmove(t, t + a, strlen(t + a) + 1);
-    b = strlen(t);
-    while (b && (unsigned char)t[b - 1] <= 32) t[--b] = 0;
+    while (*p && *p != '"') p++;
+    if (!*p) return NULL;
+    p++;
+    size_t k = 0;
+    while (*p && *p != '"') { if (k + 1 < n) out[k++] = *p; p++; }
+    out[k] = 0;
+    return *p ? p + 1 : p;
 }
 
-static void split_name(const char *raw, char *l1, char *l2, size_t n)
+static char *slurp(const char *path, long *len)
 {
-    const char *br = strchr(raw, '\n');
-    if (br) {
-        size_t k = (size_t)(br - raw);
-        if (k >= n) k = n - 1;
-        memcpy(l1, raw, k); l1[k] = 0;
-        snprintf(l2, n, "%s", br + 1);
-    } else {
-        snprintf(l1, n, "%s", raw);
-        l2[0] = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *b = (char *)malloc((size_t)n + 1);
+    if (b && fread(b, 1, (size_t)n, f) == (size_t)n) b[n] = 0;
+    else { free(b); b = NULL; }
+    fclose(f);
+    if (len) *len = n;
+    return b;
+}
+
+/* `root` is the folder holding the two-letter sample directories; the index
+ * lives in DMACHINE beside them. */
+static int load_index(const char *root)
+{
+    char p1[MAX_PATH], p2[MAX_PATH], fld[256];
+    snprintf(p1, sizeof(p1), "%s\\DMACHINE\\PXD.TXT", root);
+    snprintf(p2, sizeof(p2), "%s\\DMACHINE\\MAX.TXT", root);
+    char *idx = slurp(p1, NULL), *files = slurp(p2, NULL);
+    if (!idx || !files) { free(idx); free(files); return 0; }
+
+    const char *q = idx;
+    for (int i = 0; i < MAX_GROUPS && q; i++) {
+        char a[64], b[64];
+        q = next_field(q, a, sizeof(a));
+        if (!q) break;
+        q = next_field(q, b, sizeof(b));
+        if (!q) break;
+        g_grp_start[i] = atoi(a);
+        g_grp_count[i] = atoi(b);
+        g_grp_n = i + 1;
+        /* Nine pairs, and the ninth ends where the records begin - so stop
+         * when the starts stop climbing rather than trusting a count. */
+        if (i && g_grp_start[i] <= g_grp_start[i - 1]) { g_grp_n = i; break; }
+        if (g_grp_n == 9) break;
     }
-    tidy(l1); tidy(l2);
-    if (!l1[0] && l2[0]) { memcpy(l1, l2, n); l2[0] = 0; }
-}
 
-/* Walk the two-letter directories eJay files its samples in. */
-static int scan_library(const char *root)
-{
-    char pat[MAX_PATH];
-    WIN32_FIND_DATAA fd;
-    snprintf(pat, sizeof(pat), "%s\\*", root);
-    HANDLE dh = FindFirstFileA(pat, &fd);
-    if (dh == INVALID_HANDLE_VALUE) return 0;
-    do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        if (strlen(fd.cFileName) != 2) continue;
-        char sub[MAX_PATH];
-        snprintf(sub, sizeof(sub), "%s\\%s\\*.PXD", root, fd.cFileName);
-        WIN32_FIND_DATAA ff;
-        HANDLE fh = FindFirstFileA(sub, &ff);
-        if (fh == INVALID_HANDLE_VALUE) continue;
-        do {
-            if (g_lib_n >= (int)(sizeof(g_lib) / sizeof(g_lib[0]))) break;
-            SAMPLE *sm = &g_lib[g_lib_n];
-            snprintf(sm->path, sizeof(sm->path), "%s\\%s\\%s",
-                     root, fd.cFileName, ff.cFileName);
-            char hdr[64];
-            FILE *f = fopen(sm->path, "rb");
-            if (!f) continue;
-            size_t got = fread(hdr, 1, sizeof(hdr) - 1, f);
-            fclose(f);
-            hdr[got] = 0;
-            if (got < 8 || memcmp(hdr, "tPxD", 4)) continue;
-            split_name(hdr + 4, sm->l1, sm->l2, sizeof(sm->l1));
-            g_lib_n++;
-        } while (FindNextFileA(fh, &ff) && g_lib_n < (int)(sizeof(g_lib)/sizeof(g_lib[0])));
-        FindClose(fh);
-    } while (FindNextFileA(dh, &fd));
-    FindClose(dh);
+    const char *fq = files;
+    while (q && g_lib_n < (int)(sizeof(g_lib) / sizeof(g_lib[0]))) {
+        SAMPLE *sm = &g_lib[g_lib_n];
+        char size[64], bars[64];
+        q = next_field(q, size, sizeof(size));  if (!q) break;
+        q = next_field(q, bars, sizeof(bars));  if (!q) break;
+        q = next_field(q, fld, sizeof(fld));    if (!q) break;
+        snprintf(sm->l1, sizeof(sm->l1), "%s", fld);
+        q = next_field(q, fld, sizeof(fld));    if (!q) break;
+        snprintf(sm->l2, sizeof(sm->l2), "%s", fld);
+        fq = next_field(fq, fld, sizeof(fld));
+        if (!fq) break;
+        snprintf(sm->path, sizeof(sm->path), "%s\\%s", root, fld);
+        sm->bars = atoi(bars);
+        if (sm->bars < 1 || sm->bars > 16) sm->bars = 2;
+        g_lib_n++;
+    }
+    free(idx); free(files);
     return g_lib_n;
 }
 
@@ -371,13 +407,211 @@ static int load_mix_names(const char *path)
  * GFX_SampleZeichne draws the same list into the same lanes, so what is on the
  * screen is what is playing rather than a picture of what might be. */
 typedef struct { int lane, bar, bars, lib; } SLOT;
-static SLOT g_song[] = {
+static SLOT g_song[64] = {   /* room to add more by hand from the browser */
     { 0,  0, 4, 0 }, { 0,  8, 4, 0 }, { 1,  2, 4, 1 }, { 1, 10, 4, 1 },
     { 2,  0, 2, 2 }, { 2,  4, 2, 2 }, { 2,  8, 2, 2 }, { 2, 12, 2, 2 },
     { 3,  4, 4, 3 }, { 4,  0, 8, 4 }, { 5,  6, 4, 5 }, { 6,  8, 4, 6 },
     { 7, 12, 4, 7 },
 };
-static const int g_song_n = (int)(sizeof(g_song) / sizeof(g_song[0]));
+static int g_song_n = 13;    /* how many of those are real, so far */
+
+/* ---- the browser ---------------------------------------------------------
+ * The bottom-centre panel is `G_SAMPLE_WINDOW` in eJay's layout table, with
+ * `K_SAMPLE_VSCROLL` down its right edge and twelve `B_GRUPPE_*` buttons either
+ * side of it - six left (Loop, Drum, Bass, Guitar, Seq, Layer) and six right
+ * (Rap, Voice, Effect, Xtra, GrooveG, Wave). eJay 1's library has nine sound
+ * groups, so nine of the twelve do something and three stay dark.
+ *
+ * Geometry measured off EJAY01A: the panel at x 176..539, y 366..472; the
+ * button lozenges 49 wide at x 112 and x 569, 16 tall, on a 22-pixel pitch
+ * from y 346.
+ */
+#define ROW_H     11
+#define BTN_W     49
+#define BTN_H     16
+#define BTN_LX   112
+#define BTN_RX   569
+#define BTN_Y0   346
+#define BTN_PITCH 22
+#define SCROLL_X 543
+
+static int browser_rows(void) { return (BROWSE_Y1 - BROWSE_Y0 - 6) / ROW_H; }
+
+/* Draw every placed sample into the lanes. Called once at start-up and again
+ * whenever the arrangement gains a block, so the grid always shows the list
+ * the engine is playing. */
+static void draw_blocks(HDC dst)
+{
+    if (!g_zeich || !g_griddc || !g_screen.hdc) return;
+    const int bar = (GRID_X1 - GRID_X0) / 16;
+    BitBlt(dst, GRID_X0, GRID_Y0, GRID_X1 - GRID_X0, GRID_Y1 - GRID_Y0,
+           (HDC)(INT_PTR)g_screen.hdc, GRID_X0, GRID_Y0, SRCCOPY);
+    for (int i = 0; i < g_song_n; i++) {
+        const SLOT *sl = &g_song[i];
+        int w = sl->bars * bar, style = g_tex[i % 3];
+        const SAMPLE *sm = (sl->lib >= 0 && sl->lib < g_lib_n) ? &g_lib[sl->lib] : NULL;
+        if (!style || w < 4) continue;
+        g_zeich(style, 0, w, sm ? sm->l1 : "Sample", sm ? sm->l2 : "", 0, 0);
+        BitBlt(dst, GRID_X0 + sl->bar * bar, GRID_Y0 + sl->lane * 18 + 1,
+               w - 2, 16, (HDC)(INT_PTR)g_griddc, 0, 0, SRCCOPY);
+    }
+}
+
+/* Which category button is under the pointer, or -1. Buttons run down the left
+ * column first, then the right, which is the order SEITEN lists them in. */
+static int hit_group(int x, int y)
+{
+    for (int i = 0; i < 12; i++) {
+        int bx = (i < 6) ? BTN_LX : BTN_RX;
+        int by = BTN_Y0 + (i % 6) * BTN_PITCH;
+        if (x >= bx && x < bx + BTN_W && y >= by && y < by + BTN_H) return i;
+    }
+    return -1;
+}
+
+static void draw_browser(HDC dst)
+{
+    if (!g_lib_n) return;
+    int gs = g_grp_start[g_group], gc = g_grp_count[g_group];
+    int rows = browser_rows();
+    if (g_scroll > gc - rows) g_scroll = gc - rows;
+    if (g_scroll < 0) g_scroll = 0;
+    if (!dst || !g_screen.hdc) return;   /* clamp only, for the selftest */
+
+    /* Repaint the panel from the chrome first, so a scroll does not smear. */
+    BitBlt(dst, BROWSE_X0, BROWSE_Y0, BROWSE_X1 - BROWSE_X0, BROWSE_Y1 - BROWSE_Y0,
+           (HDC)(INT_PTR)g_screen.hdc, BROWSE_X0, BROWSE_Y0, SRCCOPY);
+
+    HFONT fnt = CreateFontA(-10, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                            0, 0, DEFAULT_QUALITY, 0, "Small Fonts");
+    HFONT old = (HFONT)SelectObject(dst, fnt);
+    SetBkMode(dst, TRANSPARENT);
+
+    for (int r = 0; r < rows && g_scroll + r < gc; r++) {
+        int idx = gs + g_scroll + r;
+        int y = BROWSE_Y0 + 4 + r * ROW_H;
+        const SAMPLE *sm = &g_lib[idx];
+        if (idx == g_sel) {
+            RECT sel = { BROWSE_X0 + 4, y - 1, BROWSE_X1 - 6, y + ROW_H - 1 };
+            HBRUSH hb = CreateSolidBrush(RGB(40, 60, 150));
+            FillRect(dst, &sel, hb);
+            DeleteObject(hb);
+        }
+        SetTextColor(dst, idx == g_sel ? RGB(255, 255, 255) : RGB(255, 190, 80));
+        TextOutA(dst, BROWSE_X0 + 8, y, sm->l1, (int)strlen(sm->l1));
+        SetTextColor(dst, idx == g_sel ? RGB(220, 230, 255) : RGB(160, 180, 240));
+        TextOutA(dst, BROWSE_X0 + 140, y, sm->l2, (int)strlen(sm->l2));
+        char bars[16];
+        snprintf(bars, sizeof(bars), "%d", sm->bars);
+        SetTextColor(dst, RGB(120, 140, 200));
+        TextOutA(dst, BROWSE_X0 + 250, y, bars, (int)strlen(bars));
+        const char *file = strrchr(sm->path, '\\');
+        if (file) TextOutA(dst, BROWSE_X0 + 276, y, file + 1, (int)strlen(file + 1));
+    }
+
+    /* The scroll thumb, sized and placed like the list it stands for. */
+    if (gc > rows) {
+        int track = BROWSE_Y1 - BROWSE_Y0 - 8;
+        int th = track * rows / gc;
+        if (th < 8) th = 8;
+        int ty = BROWSE_Y0 + 4 + (track - th) * g_scroll / (gc - rows);
+        RECT thumb = { SCROLL_X, ty, SCROLL_X + 9, ty + th };
+        HBRUSH hb = CreateSolidBrush(RGB(120, 150, 230));
+        FillRect(dst, &thumb, hb);
+        DeleteObject(hb);
+    }
+
+    /* Mark the live category, since the chrome's own buttons cannot light up
+     * until the states in EJAY02 are cut out. */
+    if (g_group < 12) {
+        int bx = (g_group < 6) ? BTN_LX : BTN_RX;
+        int by = BTN_Y0 + (g_group % 6) * BTN_PITCH;
+        HBRUSH hb = CreateSolidBrush(RGB(255, 210, 90));
+        RECT tick = { bx - 5, by + 5, bx - 1, by + BTN_H - 5 };
+        FillRect(dst, &tick, hb);
+        DeleteObject(hb);
+    }
+
+    SelectObject(dst, old);
+    DeleteObject(fnt);
+}
+
+static int browser_input(UINT m, WPARAM w, LPARAM l)
+{
+    /* The browser is the one part of this chrome that does something, so it
+     * gets the input: a category button switches the sound group, the wheel or
+     * a click in the scroll strip moves the list, a click on a row selects it,
+     * and a double click places it. Which is what eJay's own tooltip says to
+     * do - "double click for play back of a sample, move a sample to one of
+     * the tracks". */
+    if (m == WM_MOUSEWHEEL) {
+        g_scroll -= GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA * 3;
+        g_dirty = 1;
+        return 1;
+    }
+    if (m == WM_LBUTTONDOWN || m == WM_LBUTTONDBLCLK) {
+        int x = LOWORD(l), y = HIWORD(l);
+        int grp = hit_group(x, y);
+        if (grp >= 0) {
+            if (grp < g_grp_n) { g_group = grp; g_scroll = 0; g_dirty = 1; }
+            return 1;
+        }
+        if (x >= SCROLL_X && x < SCROLL_X + 9 &&
+            y >= BROWSE_Y0 && y < BROWSE_Y1) {
+            int gc = g_grp_count[g_group], rows = browser_rows();
+            if (gc > rows)
+                g_scroll = (y - BROWSE_Y0) * (gc - rows) / (BROWSE_Y1 - BROWSE_Y0);
+            g_dirty = 1;
+            return 1;
+        }
+        if (x >= BROWSE_X0 && x < BROWSE_X1 && y >= BROWSE_Y0 && y < BROWSE_Y1) {
+            int r = (y - BROWSE_Y0 - 4) / ROW_H;
+            int idx = g_grp_start[g_group] + g_scroll + r;
+            if (r >= 0 && r < browser_rows() &&
+                g_scroll + r < g_grp_count[g_group] && idx < g_lib_n) {
+                g_sel = idx;
+                g_dirty = 1;
+                if (m == WM_LBUTTONDBLCLK) g_place = idx;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The hit-testing and the scroll clamp are the only real logic in here, so
+ * they get the one check: synthetic coordinates, no mouse, no window. Run with
+ * --selftest. */
+static int browser_selftest(void)
+{
+    int bad = 0;
+    for (int i = 0; i < 12; i++) {
+        int bx = (i < 6) ? BTN_LX : BTN_RX;
+        int by = BTN_Y0 + (i % 6) * BTN_PITCH;
+        int got = hit_group(bx + BTN_W / 2, by + BTN_H / 2);
+        if (got != i) { printf("  ! button %d hit-tests as %d\n", i, got); bad++; }
+    }
+    if (hit_group(BROWSE_X0 + 40, BROWSE_Y0 + 40) != -1) {
+        printf("  ! a click in the list hit-tests as a button\n"); bad++;
+    }
+    if (g_lib_n) {
+        int save_g = g_group, save_s = g_scroll;
+        g_group = 0;
+        g_scroll = 1000000;                  /* far past the end */
+        draw_browser(NULL);                  /* clamps as a side effect */
+        if (g_scroll != g_grp_count[0] - browser_rows()) {
+            printf("  ! scroll clamped to %d, expected %d\n",
+                   g_scroll, g_grp_count[0] - browser_rows());
+            bad++;
+        }
+        g_scroll = -5;
+        draw_browser(NULL);
+        if (g_scroll != 0) { printf("  ! negative scroll not clamped\n"); bad++; }
+        g_group = save_g; g_scroll = save_s;
+    }
+    printf("  browser selftest           -> %s\n", bad ? "FAILED" : "ok");
+    return bad;
+}
 
 static void draw_cursor(HWND wnd, double frac)
 {
@@ -385,6 +619,7 @@ static void draw_cursor(HWND wnd, double frac)
     if (!g_screen.hdc) return;
     if (frac < 0.0) frac = 0.0;
     if (frac > 1.0) frac = 1.0;
+    g_cursor_frac = frac;
     int x = GRID_X0 + (int)((GRID_X1 - GRID_X0) * frac);
 
     HDC dc = GetDC(wnd);
@@ -581,7 +816,7 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);   /* a crash must not eat the trail */
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
     int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
-    int seq = 0, trace_files = 0, song = 0;
+    int seq = 0, trace_files = 0, song = 0, selftest = 0;
     const char *libdir = NULL;
     /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
     int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
@@ -606,6 +841,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--song")) { song = 1; seq = 1; samples = 1;
                                                 main_screen = 1; intro = 0; }
         else if (!strcmp(argv[i], "--trace-files")) trace_files = 1;
+        else if (!strcmp(argv[i], "--selftest")) selftest = 1;
+        else if (!strcmp(argv[i], "--group") && i + 1 < argc) g_group = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-intro")) intro = 0;
         else if (!strcmp(argv[i], "--main")) { main_screen = 1; intro = 0; }
         else if (!strcmp(argv[i], "--samples")) { samples = 1; main_screen = 1; intro = 0; }
@@ -628,7 +865,7 @@ int main(int argc, char **argv)
 
     if (libdir)
         printf("  sample library             -> %d samples under %s\n",
-               scan_library(libdir), libdir);
+               load_index(libdir), libdir);
     meter_open();
     clamp_session(volume);
 
@@ -778,53 +1015,18 @@ int main(int argc, char **argv)
         BitBlt(g_canvas, 0, 0, g_screen.w, g_screen.h,
                (HDC)(INT_PTR)g_screen.hdc, 0, 0, SRCCOPY);
 
-        const int bar = (GRID_X1 - GRID_X0) / 16;   /* sixteen bars across */
-        int drawn = 0;
-        if (Zeich && griddc) {
-            for (int i = 0; i < g_song_n; i++) {
-                const SLOT *sl = &g_song[i];
-                int w = sl->bars * bar, style = tex[i % 3];
-                const SAMPLE *sm = (sl->lib >= 0 && sl->lib < g_lib_n)
-                                 ? &g_lib[sl->lib] : NULL;
-                if (!style) continue;
-                Zeich(style, 0, w, sm ? sm->l1 : "Sample", sm ? sm->l2 : "", 0, 0);
-                BitBlt(g_canvas, GRID_X0 + sl->bar * bar, GRID_Y0 + sl->lane * 18 + 1,
-                       w - 2, 16, (HDC)(INT_PTR)griddc, 0, 0, SRCCOPY);
-                drawn++;
-            }
-        }
-        printf("  blocks drawn into the grid -> %d\n", drawn);
+        /* Keep the handles: the grid is redrawn whenever a sample is added. */
+        g_zeich = Zeich; g_griddc = griddc;
+        g_tex[0] = tex[0]; g_tex[1] = tex[1]; g_tex[2] = tex[2];
+        for (int i = 0; i < g_song_n; i++)
+            if (g_song[i].lib >= 0 && g_song[i].lib < g_lib_n)
+                g_song[i].bars = g_lib[g_song[i].lib].bars;
+        draw_blocks(g_canvas);
+        printf("  blocks drawn into the grid -> %d\n", g_song_n);
 
-        /* ---- the browser ------------------------------------------------
-         * The bottom-centre panel is `G_SAMPLE_WINDOW` in eJay's own layout
-         * table, with `K_SAMPLE_VSCROLL` down its right edge and the twelve
-         * `B_GRUPPE_*` category buttons either side of it. It lists the samples
-         * in the selected category, and you drag one from here up into a lane.
-         * Measured off EJAY01A: x 176..539, y 350..472. */
-        if (g_lib_n) {
-            HFONT fnt = CreateFontA(-10, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                                    DEFAULT_CHARSET, 0, 0, DEFAULT_QUALITY, 0,
-                                    "Small Fonts");
-            HFONT old = (HFONT)SelectObject(g_canvas, fnt);
-            SetBkMode(g_canvas, TRANSPARENT);
-            int rows = 0;
-            while (rows < g_lib_n && BROWSE_Y0 + 6 + rows * 12 < BROWSE_Y1 - 12) {
-                int y = BROWSE_Y0 + 6 + rows * 12;
-                const SAMPLE *sm = &g_lib[rows];
-                const char *file = strrchr(sm->path, '\\');
-                SetTextColor(g_canvas, RGB(255, 190, 80));
-                TextOutA(g_canvas, BROWSE_X0 + 8, y, sm->l1, (int)strlen(sm->l1));
-                SetTextColor(g_canvas, RGB(160, 180, 240));
-                TextOutA(g_canvas, BROWSE_X0 + 140, y, sm->l2, (int)strlen(sm->l2));
-                SetTextColor(g_canvas, RGB(110, 130, 190));
-                if (file) TextOutA(g_canvas, BROWSE_X0 + 280, y, file + 1,
-                                   (int)strlen(file + 1));
-                rows++;
-            }
-            SelectObject(g_canvas, old);
-            DeleteObject(fnt);
-            printf("  browser rows               -> %d of %d samples\n", rows, g_lib_n);
-        }
+        draw_browser(g_canvas);
+        printf("  browser                    -> %d groups, %d samples\n",
+               g_grp_n, g_lib_n);
         BitBlt(wdc, 0, 0, g_screen.w, g_screen.h, g_canvas, 0, 0, SRCCOPY);
         ReleaseDC(wnd, wdc);
     }
@@ -891,6 +1093,7 @@ int main(int argc, char **argv)
     fn_i_ii  ASetFader  = (fn_i_ii)  GetProcAddress(g_eng, "ASetFader");
     fn_i_p   ASetPfad   = (fn_i_p)   GetProcAddress(g_eng, "ASetPfad");
     fn_aplay APlay      = (fn_aplay) GetProcAddress(g_eng, "APlay");
+    g_aplay = APlay;
     fn_i_i   AGetTime   = (fn_i_i)   GetProcAddress(g_eng, "AGetTime");
     fn_i_i   AStart     = (fn_i_i)   GetProcAddress(g_eng, "AStart");
     static short status = 0x63;
@@ -950,6 +1153,7 @@ int main(int argc, char **argv)
         peek("after AStart");
     }
 
+    if (selftest && browser_selftest()) return 2;
     float peak = 0.0f;
     static float env[600];
     int env_n = 0;
@@ -962,7 +1166,10 @@ int main(int argc, char **argv)
      * DirectSound plays an unfilled buffer, which is loud static. Dancejay
      * pumps RTimer once per frame in its play loop; so does this. */
     fn_i_v RTimer = (fn_i_v) GetProcAddress(g_eng, "RTimer");
-    for (int i = 0; i < ticks; i++) {
+    /* --ticks 0 keeps the window up until it is closed, which is the only way
+     * to actually click anything. */
+    for (int i = 0; ticks == 0 || i < ticks; i++) {
+        if (ticks == 0 && !IsWindow(wnd)) break;
         if (seq && RTimer) RTimer();
         if (seq) mute_unless_mixing(*(short *)((char *)g_eng + 0x3AC68));
         if (ATimer) ATimer();
@@ -974,7 +1181,11 @@ int main(int argc, char **argv)
          * does; a synthetic i*16 runs the animation at whatever rate the host
          * manages instead. */
         if (main_screen && seq && AGetTime)
-            draw_cursor(wnd, (double)AGetTime(0) / (double)0xA17FC0);
+            /* AGetTime reports milliseconds - it divides the engine's byte
+             * position by 882 and multiplies by 5 - while AStart's 0xA17FC0 is
+             * samples. Sixteen bars at 120 BPM is 32,000 ms, and that is what
+             * the grid is showing. */
+            draw_cursor(wnd, AGetTime(0) / 32000.0);
         else if (main_screen && dplay && DGetZeit) {
             /* Sixteen bars at 120 BPM is 32 seconds, and DGetZeit is a byte
              * offset into a 44.1kHz 16-bit stereo stream, so the sweep is the
@@ -991,6 +1202,58 @@ int main(int argc, char **argv)
         int rc = 0;
         if (intro && Refresh) rc = Refresh((int)(GetTickCount() - t0));
         pump_messages();
+
+        /* A double click in the browser puts that sample into the first lane
+         * with room at the bar the cursor is on, exactly the gesture eJay's own
+         * tooltip describes. The engine takes it live: APlay appends to the
+         * track record, and the same slot is drawn into the grid, so the
+         * picture and the arrangement stay the same list. */
+        if (g_place >= 0 && g_place < g_lib_n) {
+            if (g_song_n < (int)(sizeof(g_song) / sizeof(g_song[0]))) {
+                int atbar = (int)(16.0 * g_cursor_frac);
+                int lane = 0;
+                for (; lane < 16; lane++) {
+                    int clash = 0;
+                    for (int k = 0; k < g_song_n; k++)
+                        if (g_song[k].lane == lane &&
+                            atbar < g_song[k].bar + g_song[k].bars &&
+                            g_song[k].bar < atbar + g_lib[g_place].bars) clash = 1;
+                    if (!clash) break;
+                }
+                if (lane < 16) {
+                    SLOT *sl = &g_song[g_song_n++];
+                    sl->lane = lane; sl->bar = atbar;
+                    sl->bars = g_lib[g_place].bars; sl->lib = g_place;
+                    if (g_aplay) {
+                        static short pst;
+                        pst = 0x63;
+                        g_aplay(0, 0, 0, 0, 0, &pst, g_lib[g_place].path,
+                                lane, atbar * 88200, 0, 0, 0x100);
+                    }
+                    printf("  placed %s / %s -> lane %d, bar %d, %d bars\n",
+                           g_lib[g_place].l1, g_lib[g_place].l2, lane, atbar,
+                           sl->bars);
+                    draw_blocks(g_canvas);
+                    {
+                        HDC dc = GetDC(wnd);
+                        BitBlt(dc, GRID_X0, GRID_Y0, GRID_X1 - GRID_X0,
+                               GRID_Y1 - GRID_Y0, g_canvas, GRID_X0, GRID_Y0, SRCCOPY);
+                        ReleaseDC(wnd, dc);
+                    }
+                }
+            }
+            g_place = -1;
+            g_dirty = 0;
+        }
+        if (g_dirty) {
+            HDC dc = GetDC(wnd);
+            draw_browser(g_canvas);
+            BitBlt(dc, BROWSE_X0 - 60, BROWSE_Y0 - 24,
+                   640 - (BROWSE_X0 - 60), BROWSE_Y1 - BROWSE_Y0 + 24,
+                   g_canvas, BROWSE_X0 - 60, BROWSE_Y0 - 24, SRCCOPY);
+            ReleaseDC(wnd, dc);
+            g_dirty = 0;
+        }
         float p = meter_peak();
         if (p > peak) peak = p;
         if (env_n < (int)(sizeof(env) / sizeof(env[0]))) env[env_n++] = p;
