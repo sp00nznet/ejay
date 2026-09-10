@@ -326,6 +326,35 @@ static int push_args(CPU *cpu, char *spec) {
     return bytes;
 }
 
+/* Feed a catalogue file to ASortIn, one path per line. MIN.TXT and
+ * MAX.TXT on the disc are exactly that: 896 and 1,351 quoted sample
+ * paths in the `ba\\aaaf.pxd` form the engine builds for itself. The VB
+ * host read one of them at startup and handed the engine its library,
+ * which is the step no amount of probing from outside was going to
+ * guess. */
+static int feed_sortlist(CPU *cpu, const EjayExport *sortin, const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "cannot open %s\n", path); return 0; }
+    char line[512];
+    int n = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char clean[512]; int c = 0;
+        for (char *q = line; *q && c < (int)sizeof(clean) - 1; q++)
+            if (*q != '"' && *q != '\r' && *q != '\n') clean[c++] = *q;
+        clean[c] = 0;
+        if (!c) continue;
+        enter_guest(cpu);
+        push_string(cpu, clean);
+        push_retaddr(cpu);
+        sortin->fn(cpu);
+        n++;
+    }
+    fclose(f);
+    printf("  fed %d sample paths to ASortIn\n", n);
+    return n;
+}
+
 int main(int argc, char **argv) {
     const char *img = EJAY_IMAGE_PATH;
     const char *dir = ".";
@@ -344,6 +373,7 @@ int main(int argc, char **argv) {
     int window = 0;
     const char *shot = NULL;
     const char *wav = NULL;
+    const char *sortlist = NULL;
     int hot = 0;
     int unstick = 0;
     unsigned wsel = 0;
@@ -368,6 +398,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--shot") && i + 1 < argc) { shot = argv[++i]; window = 1; }
         else if (!strcmp(argv[i], "--unstick")) unstick = 1;
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav = argv[++i];
+        else if (!strcmp(argv[i], "--sortlist") && i + 1 < argc) sortlist = argv[++i];
         else if (!strcmp(argv[i], "--hot")) hot = 1;
         else if (!strcmp(argv[i], "--window")) window = 1;
         else if (!strcmp(argv[i], "--magic")) magic = 1;
@@ -443,6 +474,15 @@ int main(int argc, char **argv) {
         char *colon = strchr(name, ':');
         if (colon) *colon = '\0';
 
+        /* `sortlist` in the call sequence feeds the catalogue at that point,
+         * so the library can be loaded before whatever comes next needs it. */
+        if (!strcmp(name, "sortlist")) {
+            const EjayExport *si = find_export("ASortIn");
+            if (si && si->fn && sortlist) { g_scratch = 0x0100; feed_sortlist(&cpu, si, sortlist); }
+            else fprintf(stderr, "sortlist named in the sequence but --sortlist not given\n");
+            continue;
+        }
+
         const EjayExport *e = find_export(name);
         if (!e) {
             fprintf(stderr, "no such export: %s\n", name);
@@ -492,6 +532,17 @@ int main(int argc, char **argv) {
             printf("   *** sp %04X, expected %04X (off by %d) ***",
                    cpu.sp, expect, (int)(int16_t)(cpu.sp - expect));
         printf("\n");
+    }
+
+    if (sortlist) {
+        const EjayExport *si = find_export("ASortIn");
+        if (si && si->fn) {
+            /* g_scratch would run off the end of the stack segment over
+             * hundreds of paths, so it is rewound for each one - the engine
+             * copies the string out before returning. */
+            g_scratch = 0x0100;
+            feed_sortlist(&cpu, si, sortlist);
+        }
     }
 
     /* Run the engine's own clock. DanceTimer is what refills and queues the

@@ -15,10 +15,35 @@ alongside the same-era Win16/Win32 arc of DinoPark Tycoon (1993), El-Fish
 
 ## Status
 
-**It renders.** The 1997 engine initialises, runs, and draws its playback
-cursor into a real window - 62 BitBlt calls, 31 one-pixel bars marching across
-the display. Audio is not there yet: the device opens at 44.1 kHz stereo and
-takes a buffer, but the mixer clears that buffer rather than filling it.
+**It plays, and it draws.** The 1997 engine initialises, decodes its intro
+sample, streams it to a real sound card at 22,050 Hz, and animates its playback
+cursor in a window - at the same time, out of recompiled 16-bit machine code.
+
+![The playback cursor](docs/img/cursor.png)
+
+*The engine's entire user interface: a one-pixel cursor stepping across the
+sample strip, drawn through its single `BitBlt` import. Everything else Dance
+eJay draws lives in `DANCE.EXE`, which is VB4 p-code and cannot be lifted.*
+
+![The decoded audio](docs/img/waveform.png)
+
+*Amplitude envelope of `INTRO.PXD` after the engine decoded it - 5.94 seconds
+of 8-bit 22 kHz audio, captured with `--wav` straight out of the buffers handed
+to `waveOutWrite`. It is decoded, not copied: no window of this output appears
+anywhere in the source file.*
+
+```
+build-trace/ejay.exe --dir original/ejay1/DANCE/DMACHINE ^
+    AInit:1 ADevice:d:0 AStart:d:2000000 InterStart:d:0 ^
+    ABilder:d:1,d:0,d:0,d:640,d:0,d:10,d:100 ^
+    --pump 5000 --wav work/intro.wav --window --shot docs/img/cursor.bmp
+```
+
+`ADevice` before `AStart` is the part that took longest to find: without it the
+device never opens and the engine mixes silence for ever.
+
+The **sampler** path - placing samples on the timeline and playing through them
+- is still silent. See [ENGINE](docs/ENGINE.md) for exactly where it stops.
 
 **The 1997 engine initialises and runs.** `DANCE02.DLL` is lifted whole -
 30,904 bytes of 16-bit machine code into 1,244 C functions - `LibMain`
