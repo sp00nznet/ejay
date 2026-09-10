@@ -61,10 +61,31 @@ void ejay_fn_hit(const char *n)
 /* Selector-write watchpoint. g_wsel is 0 unless something sets it, so this
  * never fires in a normal run; it exists because "which lifted function
  * scribbled on that selector" is otherwise unanswerable. */
+/* Who writes to a watched selector. The mix buffer takes hundreds of
+ * thousands of writes when it works, so these are counted per lifted
+ * function rather than printed - the question is only whether ANYTHING
+ * writes it, and from where. */
+#define SELW_SLOTS 12
+static const char *selw_who[SELW_SLOTS];
+static unsigned long selw_hits[SELW_SLOTS];
+unsigned long g_selw_total;
+
 void ejay_sel_write(uint16_t seg, uint16_t off, uint16_t val)
 {
-    fprintf(stderr, "[sel] write %04X:%04X = %04X from %s\n", seg, off, val,
-            g_fn_ring[(g_fn_ring_pos - 1u) & (EJAY_FN_RING_SIZE - 1)]);
+    const char *fn = g_fn_ring[(g_fn_ring_pos - 1u) & (EJAY_FN_RING_SIZE - 1)];
+    (void)seg; (void)off; (void)val;
+    g_selw_total++;
+    for (int k = 0; k < SELW_SLOTS; k++) {
+        if (!selw_who[k]) { selw_who[k] = fn; selw_hits[k] = 1; return; }
+        if (selw_who[k] == fn) { selw_hits[k]++; return; }
+    }
+}
+
+static void selw_report(void)
+{
+    printf("  %lu writes to the watched selector\n", g_selw_total);
+    for (int k = 0; k < SELW_SLOTS && selw_who[k]; k++)
+        printf("    %-16s %lu\n", selw_who[k], selw_hits[k]);
 }
 
 /* Guest divide by zero. On real hardware this is INT 0; here the registers are
@@ -299,6 +320,7 @@ int main(int argc, char **argv) {
     int volume = 20;               /* percent; bring-up runs stay quiet */
     int magic = 0;
     int window = 0;
+    unsigned wsel = 0;
     uint16_t pcm_sel[8]; uint32_t pcm_len = 0; int npcm = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -315,6 +337,8 @@ int main(int argc, char **argv) {
             pcm_sel[npcm++] = (uint16_t)strtoul(argv[++i], NULL, 0);
             pcm_len = strtoul(argv[++i], NULL, 0);
         }
+        else if (!strcmp(argv[i], "--wsel") && i + 1 < argc)
+            wsel = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--window")) window = 1;
         else if (!strcmp(argv[i], "--magic")) magic = 1;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc && w_n < MAX_WATCH) {
@@ -331,6 +355,7 @@ int main(int argc, char **argv) {
     SetUnhandledExceptionFilter(crash_handler);
     ejay_set_data_dir(dir);
     ejay_set_test_volume(volume);
+    g_wsel = (uint16_t)wsel;      /* arms cpu.h EJAY_SELW on guest writes */
     if (window && !ejay_video_open(640, 200))
         fprintf(stderr, "could not open a window; drawing goes nowhere\n");
 
@@ -472,6 +497,7 @@ int main(int argc, char **argv) {
             }
         }
         printf("%u ticks, %u lifted calls\n", ticks, g_fn_ring_pos - before);
+        if (wsel) selw_report();
         if (window) printf("  %d BitBlt calls\n", ejay_video_blits());
         for (int k = 0; k < w_n; k++)
             printf("  %s ran %lu times\n", w_name[k], w_hits[k]);
