@@ -1,0 +1,64 @@
+# Build artifacts
+build/
+out/
+cmake-build-*/
+*.obj
+*.o
+*.lib
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+CMakeSettings.json
+CMakeUserPresets.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Scratch / regeneratable analysis output
+work/
+*.json.bak
+
+# Generated recompiled code
+src/recomp/gen/
+src/recomp/imports_stub.c
+
+# Extracted assets (regenerate from your own copies)
+extracted/
+
+# --- Original retail game files: NOT redistributed in this repo ---
+# Dance eJay (c) 1997 and Dance eJay 2 (c) 1998-1999 PXD Musicsoft Inc. /
+# eJay AG. The audio DLLs are (c) Bernhard Throll / THROLL GmbH. Long out of
+# print; copyright most likely still subsists. Keep ALL original binaries and
+# assets local-only. Bring your own CDs and drop them into original/ yourself.
+original/
+*.iso
+*.ISO
+*.EXE
+*.DLL
+*.VBX
+*.OCX
+*.PXD
+*.pxd
+*.SCT
+*.PAL
+*.TLB
+*.hlp
+*.HLP
+*.pdf
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
