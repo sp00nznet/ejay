@@ -342,6 +342,7 @@ int main(int argc, char **argv) {
     int window = 0;
     const char *shot = NULL;
     int hot = 0;
+    int unstick = 0;
     unsigned wsel = 0;
     uint16_t pcm_sel[8]; uint32_t pcm_len = 0; int npcm = 0;
 
@@ -362,6 +363,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--wsel") && i + 1 < argc)
             wsel = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--shot") && i + 1 < argc) { shot = argv[++i]; window = 1; }
+        else if (!strcmp(argv[i], "--unstick")) unstick = 1;
         else if (!strcmp(argv[i], "--hot")) hot = 1;
         else if (!strcmp(argv[i], "--window")) window = 1;
         else if (!strcmp(argv[i], "--magic")) magic = 1;
@@ -512,6 +514,18 @@ int main(int argc, char **argv) {
                     enter_guest(&cpu);
                     push_retaddr(&cpu);
                     atimer->fn(&cpu);
+                }
+                /* Diagnostic, not a fix. The loader parks a voice at 0xFFFE
+                 * after reading its file and 4ED4 will only revisit a voice
+                 * whose flag is 0, so the parse pass never runs. Forcing the
+                 * flag back tests whether that transition is the only thing
+                 * between here and sound. */
+                if (unstick) {
+                    for (int v = 0; v < 8; v++) {
+                        uint16_t rec = (uint16_t)(0x8BC + v * 0x102 + 0x44);
+                        if (mem_read16(&cpu, EJAY_AUTO_DATA_SEG, rec) == 0xFFFE)
+                            mem_write16(&cpu, EJAY_AUTO_DATA_SEG, rec, 0);
+                    }
                 }
                 ticks++;
             } else if (hot && atimer && atimer->fn) {
