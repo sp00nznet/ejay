@@ -69,12 +69,20 @@ void ejay_fn_hit(const char *n)
 static const char *selw_who[SELW_SLOTS];
 static unsigned long selw_hits[SELW_SLOTS];
 unsigned long g_selw_total;
+static unsigned long *selw_bysel;
 
 void ejay_sel_write(uint16_t seg, uint16_t off, uint16_t val)
 {
     const char *fn = g_fn_ring[(g_fn_ring_pos - 1u) & (EJAY_FN_RING_SIZE - 1)];
-    (void)seg; (void)off; (void)val;
+    (void)off; (void)val;
     g_selw_total++;
+    if (g_wsel == 0xFFFFu) {
+        /* Watching everything: count by SELECTOR, so the block that receives
+         * decoded audio shows up without having to guess which one it is. */
+        if (!selw_bysel) selw_bysel = (unsigned long *)calloc(65536, sizeof(unsigned long));
+        if (selw_bysel) selw_bysel[seg]++;
+        return;
+    }
     for (int k = 0; k < SELW_SLOTS; k++) {
         if (!selw_who[k]) { selw_who[k] = fn; selw_hits[k] = 1; return; }
         if (selw_who[k] == fn) { selw_hits[k]++; return; }
@@ -83,7 +91,18 @@ void ejay_sel_write(uint16_t seg, uint16_t off, uint16_t val)
 
 static void selw_report(void)
 {
-    printf("  %lu writes to the watched selector\n", g_selw_total);
+    printf("  %lu guest writes seen\n", g_selw_total);
+    if (selw_bysel) {
+        for (int top = 0; top < 10; top++) {
+            unsigned best = 0; unsigned long bn = 0;
+            for (unsigned k = 1; k < 65536; k++)
+                if (selw_bysel[k] > bn) { bn = selw_bysel[k]; best = k; }
+            if (!bn) break;
+            printf("    sel %04X  %lu writes\n", best, bn);
+            selw_bysel[best] = 0;
+        }
+        return;
+    }
     for (int k = 0; k < SELW_SLOTS && selw_who[k]; k++)
         printf("    %-16s %lu\n", selw_who[k], selw_hits[k]);
 }
