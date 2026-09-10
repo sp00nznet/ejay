@@ -35,12 +35,15 @@ stack: lifted 1997 code, the Win16 shim, Win32. 56 of the 60 imports are
 implemented, including the whole waveOut/waveIn/aux surface, and every call
 returns with the stack exactly balanced.
 
-Nothing is audible yet, and [ENGINE](docs/ENGINE.md) records why: the engine
-has **two clocks**, and the waveOut path hangs off the one the *host* was
-supposed to call, not the one it registers for itself. Driving both takes the
-work per tick from 4 lifted calls to about 130. What is still missing is the
-command that queues a sample - `APlay` is a multiplexed call and only its
-"remember this path" mode is decoded so far.
+Nothing is audible yet, but the path is mapped end to end.
+[ENGINE](docs/ENGINE.md) has it: the engine has **two clocks** and the waveOut
+path hangs off the one the host was meant to call; `APlay` is a multiplexed
+command whose values from 3 up are sample slots; and the `.PXD` load happens on
+the timer tick, not in `APlay`. Triggering a voice and pumping the clock makes
+the engine build a sample path for itself and try to open it.
+
+`AWaveDauer` already reads a real sample off the disc - 270 bytes of header,
+magic `tPxD` - and answers with a duration.
 
 | | |
 |---|---:|
