@@ -15,9 +15,36 @@ alongside the same-era Win16/Win32 arc of DinoPark Tycoon (1993), El-Fish
 
 ## Status
 
-**Recon complete. Nothing is lifted yet.** Both discs are torn down, every
-binary is identified, and the plan below is built on measurements rather than
-guesses. See [RECON](docs/RECON.md) for the full teardown.
+**The 1997 engine initialises.** `DANCE02.DLL` is lifted whole - 30,904 bytes
+of 16-bit machine code into 1,244 C functions - and its `LibMain` runs to
+completion in recompiled code. Four of its exports have been called and answer:
+
+```
+LibMain returned ax=0100 (success)
+
+  AGetTime  ax=0000      no playback in progress
+  AGetFree  ax=0000      no free voices yet
+  AGetFull  ax=0001
+  ALautGet  ax=00FA      master volume, 250
+```
+
+`ALautGet` reaches `waveOutGetVolume` on its way out, which means control is
+crossing the whole stack: lifted 1997 code, into the Win16 shim, into Win32.
+
+Nothing is audible yet - the `waveOut` family is still stubbed. See
+[RECON](docs/RECON.md) for the teardown the plan is built on.
+
+| | |
+|---|---:|
+| Code lifted | 30,904 of 30,904 bytes - **100%** |
+| Functions | 1,244 |
+| Entry points recovered by name | 33 of 34 |
+| Lines of generated C | 30,700 |
+| Win16 imports bridged | 32 hand-written, 28 stubbed |
+| Unresolved call targets | 1 |
+
+The one unresolved target is `___EXPORTEDSTUB`, a Borland helper whose entry
+point does not land on an instruction boundary. Nothing calls it.
 
 ## The finding
 
@@ -119,6 +146,40 @@ work/           scratch analysis output
 
 `../tools` is a checkout of [pcrecomp](https://github.com/sp00nznet/pcrecomp),
 the same sibling layout the other pcrecomp-family projects use.
+
+## Building
+
+MinGW-w64 GCC, CMake, Ninja, and Python 3 with `capstone` and `pefile`. IDA is
+optional but does two jobs nothing else here can: it resolves all 60 Win16
+import ordinals to real API names, and it gives byte-accurate instruction heads
+so the sweep cannot desync on data-in-code.
+
+```bash
+cp original/ejay1/DANCE/DMACHINE/DANCE02.DLL work/
+
+py -3.11 tools/ida_export.py work/DANCE02.DLL work/ida_funcs.json   # optional
+python tools/lift_dance02.py        # 30,904 bytes -> 1,244 C functions
+python tools/gen_image.py           # flat memory image + segment layout
+python tools/gen_exports.py         # the 34 named entry points
+python tools/gen_win16_stubs.py     # the import surface
+python tools/gen_segments_h.py
+python tools/gen_dispatch.py
+python tools/gen_stubs.py
+
+cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=gcc
+cmake --build build
+
+build/ejay.exe --dir original/ejay1/DANCE/DMACHINE            # LibMain + export list
+build/ejay.exe --dir original/ejay1/DANCE/DMACHINE ALautGet   # call one
+python tools/test_engine.py                                   # the smoke test
+```
+
+The lift takes about a minute; the build, a couple more.
+
+`-O2` is a correctness requirement, not a preference: the lifter turns every
+intra-segment jump into `target(cpu); return;`, so a guest loop spanning lifted
+functions is host recursion, and only sibling-call optimisation turns it back
+into a loop.
 
 ## Reproducing the recon
 

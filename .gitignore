@@ -30,9 +30,15 @@ venv/
 work/
 *.json.bak
 
-# Generated recompiled code
-src/recomp/gen/
-src/recomp/imports_stub.c
+# Generated recompiled code and everything derived from the target binaries.
+# All of it comes back from `python tools/lift_dance02.py` and the gen_* tools.
+src/
+build_data/
+runtime/segments.h
+runtime/exports.h
+runtime/runtime_api.h
+runtime/mem_layout.h
+runtime/win16/win16_stubs.c
 
 # Extracted assets (regenerate from your own copies)
 extracted/

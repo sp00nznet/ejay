@@ -1,0 +1,173 @@
+"""
+gen_image.py - Build the flat memory image + layout for the recomp runtime.
+
+The lifted C normalizes every relocated selector to its NE segment index
+(SEG_n == (uint16_t)n). This tool builds a flat memory image where each NE
+segment n is placed at SEG_BASE[n], copies segment data in, and applies all
+INTERNAL relocations so that:
+  - selector fields hold the segment INDEX n (so SEG_BASE[n] resolves them)
+  - offset fields hold the target offset
+Imports (Win16 ordinals) are left alone (handled as direct C calls).
+
+Outputs:
+  build_data/mem_image.bin   - flat image to load at runtime
+  runtime/mem_layout.h       - SEG_BASE[] table, sizes, entry/stack constants
+
+Run: python tools/gen_image.py work/DANCE02.DLL
+"""
+import sys
+import os
+import struct
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(ROOT, 'tools'))
+
+from ne_parse import parse_ne
+
+PARA = 16
+MAX_SEL = 0x10000  # selector table covers any 16-bit value (raw selectors too)
+
+
+def roundup(n, a):
+    return (n + a - 1) // a * a
+
+
+def chain_offsets(seg, r):
+    """All fixup offsets for a relocation: walk the NE chain through seg.data
+    (word at each location -> next, until 0xFFFF). Additive = single site."""
+    if r.additive or not seg.data:
+        return [r.offset]
+    offs = []
+    off = r.offset
+    seen = set()
+    data = seg.data
+    while off != 0xFFFF and off not in seen and 0 <= off + 1 < len(data):
+        seen.add(off)
+        offs.append(off)
+        off = struct.unpack_from('<H', data, off)[0]
+    return offs
+
+
+def main():
+    exe = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, 'work', 'DANCE02.DLL')
+    ne = parse_ne(exe)
+
+    nseg = len(ne.segments)
+    region = [0] * (nseg + 1)      # region size per segment number
+    base = [0] * (MAX_SEL)         # SEG_BASE[selector] -> flat offset
+
+    # Layout: each segment gets max(actual,alloc) bytes, paragraph-aligned.
+    cursor = PARA  # leave a guard paragraph at offset 0 (null selector)
+    for s in ne.segments:
+        sz = max(s.actual_size, s.alloc_size, 1)
+        region[s.index] = roundup(sz, PARA)
+        base[s.index] = cursor
+        cursor += region[s.index]
+
+    # DANCE02 is a DLL: SS:SP in the NE header is 0:0 because a Win16 DLL runs
+    # on whatever stack its caller had. The harness has to supply one, so
+    # reserve a synthetic 64K segment past the real ones and hand it out as
+    # selector nseg+1.
+    stack_seg = nseg + 1
+    region.append(0x10000)
+    base[stack_seg] = cursor
+    cursor += 0x10000
+
+    # Guard region for unmapped/raw selectors -> isolated 64K.
+    guard_base = cursor
+    cursor += 0x10000
+    image_size = cursor
+    for sel in range(MAX_SEL):
+        if base[sel] == 0:
+            base[sel] = guard_base
+    base[0] = guard_base  # null selector -> guard
+
+    image = bytearray(image_size)
+
+    # Copy segment data
+    for s in ne.segments:
+        if s.data:
+            b = base[s.index]
+            image[b:b + len(s.data)] = s.data
+
+    # Apply INTERNAL relocations
+    applied = 0
+    skipped_move = 0
+    for s in ne.segments:
+        for r in s.relocations:
+            if (r.flags & 3) != 0:      # only internal references
+                continue
+            if r.target_seg == 0xFF:    # moveable entry point (entry table) - skip for now
+                skipped_move += 1
+                continue
+            tseg = r.target_seg
+            if not (1 <= tseg <= nseg):
+                continue
+            sel = tseg                  # normalized selector == segment index
+            for off in chain_offsets(s, r):
+                addr = base[s.index] + off
+                if addr + 1 >= image_size:
+                    continue
+                if r.src_type == 2:        # SELECTOR (2 bytes)
+                    struct.pack_into('<H', image, addr, sel)
+                elif r.src_type == 5:      # OFFSET16 (2 bytes)
+                    struct.pack_into('<H', image, addr, r.target_off & 0xFFFF)
+                elif r.src_type == 3:      # FAR_PTR (off16 + sel16)
+                    if addr + 3 < image_size:
+                        struct.pack_into('<H', image, addr, r.target_off & 0xFFFF)
+                        struct.pack_into('<H', image, addr + 2, sel)
+                elif r.src_type == 11:     # PTR48 (off32 + sel16)
+                    if addr + 5 < image_size:
+                        struct.pack_into('<I', image, addr, r.target_off & 0xFFFFFFFF)
+                        struct.pack_into('<H', image, addr + 4, sel)
+                else:
+                    continue
+                applied += 1
+
+    # Write image
+    out_dir = os.path.join(ROOT, 'build_data')
+    os.makedirs(out_dir, exist_ok=True)
+    img_path = os.path.join(out_dir, 'mem_image.bin')
+    with open(img_path, 'wb') as f:
+        f.write(image)
+
+    # Write layout header
+    hdr = []
+    hdr.append('/* mem_layout.h - Auto-generated by gen_image.py. Do not edit. */')
+    hdr.append('#ifndef EJAY_MEM_LAYOUT_H')
+    hdr.append('#define EJAY_MEM_LAYOUT_H')
+    hdr.append('#include <stdint.h>')
+    hdr.append(f'#define EJAY_IMAGE_SIZE {image_size}u')
+    hdr.append(f'#define EJAY_GUARD_BASE {guard_base}u')
+    hdr.append(f'#define EJAY_NUM_SEG {stack_seg}')
+    hdr.append(f'#define EJAY_CODE_SEG {ne.cs}')
+    hdr.append(f'#define EJAY_ENTRY_SEG {ne.cs}')
+    hdr.append(f'#define EJAY_ENTRY_IP 0x{ne.ip:04X}u')
+    hdr.append(f'#define EJAY_STACK_SEG {stack_seg}   /* synthetic: a DLL brings no stack */')
+    hdr.append('#define EJAY_STACK_SP 0xFFFEu')
+    hdr.append(f'#define EJAY_HEAP_SIZE 0x{ne.heap_size:04X}')
+    hdr.append(f'#define EJAY_AUTO_DATA_SEG {ne.auto_data_seg}')
+    # Emit a compact base table for segment numbers 0..nseg; runtime expands
+    # any other selector to the guard base.
+    hdr.append(f'static const uint32_t SEG_SEGMENT_BASE[{stack_seg + 1}] = {{')
+    row = []
+    for n in range(0, stack_seg + 1):
+        row.append(str(base[n]))
+        if len(row) == 12:
+            hdr.append('    ' + ','.join(row) + ',')
+            row = []
+    if row:
+        hdr.append('    ' + ','.join(row) + ',')
+    hdr.append('};')
+    hdr.append('#endif /* EJAY_MEM_LAYOUT_H */')
+
+    with open(os.path.join(ROOT, 'runtime', 'mem_layout.h'), 'w', encoding='utf-8', newline='\n') as f:
+        f.write('\n'.join(hdr) + '\n')
+
+    print(f'image: {image_size} bytes ({image_size/1048576:.2f} MB) -> {img_path}')
+    print(f'guard_base=0x{guard_base:X}  segments={nseg}  relocs applied={applied}  moveable skipped={skipped_move}')
+    print(f'entry seg{ne.cs}:0x{ne.ip:04X}  stack seg{ne.ss}:0x{ne.sp:04X}')
+
+
+if __name__ == '__main__':
+    main()
