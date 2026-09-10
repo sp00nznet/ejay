@@ -75,6 +75,13 @@ static struct {
     CPU     *cpu;
 } g_hdr[MAX_HDRS];
 
+static WAVEFORMATEX g_fmt;          /* the format the engine last opened */
+static const char *g_dump_path;     /* where to write the queued audio */
+static FILE *g_dump;
+static unsigned long g_dump_bytes;
+
+void ejay_wave_dump(const char *path) { g_dump_path = path; }
+
 #define MAX_DEV 8
 static struct {
     int       used;
@@ -209,6 +216,7 @@ void MMSYSTEM_WAVEOUTOPEN(CPU *cpu) {
     }
     g_dev[slot].used = 1;
     g_dev[slot].out = hwo;
+    g_fmt = wf;
     apply_test_volume(hwo);
     if (h_seg) mem_write16(cpu, h_seg, h_off, (uint16_t)(slot + 1));
     ret16(cpu, 22, MMSYSERR_NOERROR);
@@ -287,17 +295,45 @@ void MMSYSTEM_WAVEOUTWRITE(CPU *cpu) {
      * the 16-bit frames actually being handed to the driver, so "the engine
      * queued a buffer" and "the engine mixed audio" stay separate claims. */
     {
-        const int16_t *pcm = (const int16_t *)g_hdr[i].host.lpData;
-        uint32_t n = g_hdr[i].host.dwBufferLength / 2, nz = 0;
-        int32_t peak = 0;
-        for (uint32_t k = 0; k < n; k++) {
-            int32_t v = pcm[k];
-            if (v) nz++;
-            if (v < 0) v = -v;
-            if (v > peak) peak = v;
+        /* Measure in the units the engine actually opened - reading 8-bit
+         * mono as 16-bit stereo produces impressive numbers that mean
+         * nothing. */
+        const unsigned char *b = (const unsigned char *)g_hdr[i].host.lpData;
+        uint32_t len = g_hdr[i].host.dwBufferLength, nz = 0;
+        long peak = 0;
+        if (g_fmt.wBitsPerSample == 8) {
+            for (uint32_t k = 0; k < len; k++) {
+                long v = (long)b[k] - 128;          /* 8-bit PCM is unsigned */
+                if (v) nz++;
+                if (v < 0) v = -v;
+                if (v > peak) peak = v;
+            }
+            fprintf(stderr, "[wave] buffer: %u samples 8-bit %uch %uHz, "
+                            "peak %ld/127, %u/%u non-silent\n",
+                    len, g_fmt.nChannels, (unsigned)g_fmt.nSamplesPerSec,
+                    peak, nz, len);
+        } else {
+            const int16_t *pcm = (const int16_t *)b;
+            uint32_t n = len / 2;
+            for (uint32_t k = 0; k < n; k++) {
+                long v = pcm[k];
+                if (v) nz++;
+                if (v < 0) v = -v;
+                if (v > peak) peak = v;
+            }
+            fprintf(stderr, "[wave] buffer: %u samples 16-bit %uch %uHz, "
+                            "peak %ld/32767, %u/%u non-silent\n",
+                    n, g_fmt.nChannels, (unsigned)g_fmt.nSamplesPerSec,
+                    peak, nz, n);
         }
-        fprintf(stderr, "[wave] buffer: %u frames, peak %d, %u/%u non-zero\n",
-                n / 2, (int)peak, nz, n);
+        if (g_dump_path) {
+            if (!g_dump) {
+                g_dump = fopen(g_dump_path, "wb");
+                if (g_dump) { unsigned char hdr[44]; memset(hdr, 0, 44);
+                              fwrite(hdr, 1, 44, g_dump); }   /* patched on close */
+            }
+            if (g_dump) { fwrite(b, 1, len, g_dump); g_dump_bytes += len; }
+        }
     }
     MMRESULT r = waveOutWrite(hwo, &g_hdr[i].host, sizeof(WAVEHDR));
     WLOG("[wave] write %04X:%04X len=%u -> %u\n", seg, off,
@@ -378,6 +414,32 @@ void MMSYSTEM_WAVEOUTGETDEVCAPS(CPU *cpu) {
         mem_write32(cpu, seg, (uint16_t)(off + 46), caps.dwSupport);
     }
     ret16(cpu, 8, (uint16_t)r);
+}
+
+void ejay_wave_dump_close(void)
+{
+    if (!g_dump) return;
+    unsigned long dat = g_dump_bytes, riff = 36 + dat;
+    unsigned short ch = g_fmt.nChannels ? g_fmt.nChannels : 1;
+    unsigned short bits = g_fmt.wBitsPerSample ? g_fmt.wBitsPerSample : 8;
+    unsigned long rate = g_fmt.nSamplesPerSec ? g_fmt.nSamplesPerSec : 22050;
+    unsigned short align = (unsigned short)(ch * bits / 8);
+    unsigned long bps = rate * align;
+    unsigned char h[44];
+    memcpy(h, "RIFF", 4);      memcpy(h + 4, &riff, 4);
+    memcpy(h + 8, "WAVEfmt ", 8);
+    unsigned long f16 = 16;    memcpy(h + 16, &f16, 4);
+    unsigned short pcm = 1;    memcpy(h + 20, &pcm, 2);
+    memcpy(h + 22, &ch, 2);    memcpy(h + 24, &rate, 4);
+    memcpy(h + 28, &bps, 4);   memcpy(h + 32, &align, 2);
+    memcpy(h + 34, &bits, 2);  memcpy(h + 36, "data", 4);
+    memcpy(h + 40, &dat, 4);
+    fseek(g_dump, 0, SEEK_SET);
+    fwrite(h, 1, 44, g_dump);
+    fclose(g_dump);
+    g_dump = NULL;
+    fprintf(stderr, "[wave] wrote %s: %lu bytes of %u-bit %uch %luHz audio\n",
+            g_dump_path, dat, bits, ch, rate);
 }
 
 /* ===== aux: the master volume ========================================== */

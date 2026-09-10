@@ -125,6 +125,8 @@ void ejay_video_pump(void);
 void ejay_video_close(void);
 int  ejay_video_blits(void);
 int  ejay_video_save(const char *path);
+void ejay_wave_dump(const char *path);
+void ejay_wave_dump_close(void);
 
 /* The multimedia timer, from runtime/win16/wave.c. The engine asks for a 32 ms
  * tick whose callback is DanceTimer, and a real timer would deliver it on the
@@ -341,6 +343,7 @@ int main(int argc, char **argv) {
     int magic = 0;
     int window = 0;
     const char *shot = NULL;
+    const char *wav = NULL;
     int hot = 0;
     int unstick = 0;
     unsigned wsel = 0;
@@ -364,6 +367,7 @@ int main(int argc, char **argv) {
             wsel = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--shot") && i + 1 < argc) { shot = argv[++i]; window = 1; }
         else if (!strcmp(argv[i], "--unstick")) unstick = 1;
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav = argv[++i];
         else if (!strcmp(argv[i], "--hot")) hot = 1;
         else if (!strcmp(argv[i], "--window")) window = 1;
         else if (!strcmp(argv[i], "--magic")) magic = 1;
@@ -381,6 +385,7 @@ int main(int argc, char **argv) {
     SetUnhandledExceptionFilter(crash_handler);
     ejay_set_data_dir(dir);
     ejay_set_test_volume(volume);
+    if (wav) ejay_wave_dump(wav);
     g_wsel = (uint16_t)wsel;      /* arms cpu.h EJAY_SELW on guest writes */
     if (window && !ejay_video_open(640, 200))
         fprintf(stderr, "could not open a window; drawing goes nowhere\n");
@@ -555,6 +560,7 @@ int main(int argc, char **argv) {
                    mem_read32(&cpu, EJAY_AUTO_DATA_SEG, peek[k]));
     }
 
+    if (wav) ejay_wave_dump_close();
     if (shot)
         printf("%s %s\n", ejay_video_save(shot) ? "wrote" : "could not write", shot);
     if (window) ejay_video_close();
