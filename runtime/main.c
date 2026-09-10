@@ -80,6 +80,10 @@ void ejay_div0(const char *kind)
 
 void ejay_set_data_dir(const char *dir);
 void ejay_set_test_volume(int pct);   /* -1 leaves the engine in charge */
+int  ejay_video_open(int w, int h);
+void ejay_video_pump(void);
+void ejay_video_close(void);
+int  ejay_video_blits(void);
 
 /* The multimedia timer, from runtime/win16/wave.c. The engine asks for a 32 ms
  * tick whose callback is DanceTimer, and a real timer would deliver it on the
@@ -294,6 +298,7 @@ int main(int argc, char **argv) {
     int pump_ms = 0;
     int volume = 20;               /* percent; bring-up runs stay quiet */
     int magic = 0;
+    int window = 0;
     uint16_t pcm_sel[8]; uint32_t pcm_len = 0; int npcm = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -310,6 +315,7 @@ int main(int argc, char **argv) {
             pcm_sel[npcm++] = (uint16_t)strtoul(argv[++i], NULL, 0);
             pcm_len = strtoul(argv[++i], NULL, 0);
         }
+        else if (!strcmp(argv[i], "--window")) window = 1;
         else if (!strcmp(argv[i], "--magic")) magic = 1;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc && w_n < MAX_WATCH) {
             w_name[w_n++] = argv[++i];
@@ -325,6 +331,8 @@ int main(int argc, char **argv) {
     SetUnhandledExceptionFilter(crash_handler);
     ejay_set_data_dir(dir);
     ejay_set_test_volume(volume);
+    if (window && !ejay_video_open(640, 200))
+        fprintf(stderr, "could not open a window; drawing goes nowhere\n");
 
     CPU cpu;
     cpu_init(&cpu);
@@ -364,6 +372,7 @@ int main(int argc, char **argv) {
 
     if (!ncall) {
         list_exports();
+    if (window) ejay_video_close();
         cpu_free(&cpu);
         return 0;
     }
@@ -458,10 +467,12 @@ int main(int argc, char **argv) {
                 }
                 ticks++;
             } else {
+                ejay_video_pump();
                 Sleep(1);
             }
         }
         printf("%u ticks, %u lifted calls\n", ticks, g_fn_ring_pos - before);
+        if (window) printf("  %d BitBlt calls\n", ejay_video_blits());
         for (int k = 0; k < w_n; k++)
             printf("  %s ran %lu times\n", w_name[k], w_hits[k]);
         if (magic) find_magic(&cpu);

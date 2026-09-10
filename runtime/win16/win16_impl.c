@@ -346,7 +346,7 @@ void MMSYSTEM_AUXGETNUMDEVS(CPU *cpu)     { ret16(cpu, 0, (uint16_t)auxGetNumDev
  * display; CallNextHookEx is AHook, the engine's message hook. Neither is on
  * the audio path, so both are honest no-ops until there is a window to draw
  * into. */
-void GDI_BITBLT(CPU *cpu)          { ret16(cpu, 20, 1); }
+/* GDI_BITBLT lives in video.c: it has a window to draw into. */
 void USER_CALLNEXTHOOKEX(CPU *cpu) { ret32(cpu, 10, 0); }
 
 /* WIN87EM.__FPMATH is the floating-point emulator entry. The lifted code has
