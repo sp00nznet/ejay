@@ -51,6 +51,45 @@ device never opens and the engine mixes silence for ever.
 The **sampler** path - placing samples on the timeline and playing through them
 - is still silent. See [ENGINE](docs/ENGINE.md) for exactly where it stops.
 
+### Dance eJay 2 draws, and plays
+
+The 1999 pair - `PXD32D4.DLL` for audio, `PXD32CL1.DLL` for graphics - now run
+under `host32/ejay2.exe`, driven in the order the shipping program uses, with a
+window of ours to draw into.
+
+![Dance eJay 2's system check, rendered by its own 1998 graphics DLL](docs/img/ejay2-systemcheck.png)
+
+*The Dance eJay 2 start-up screen, drawn by `PXD32CL1.DLL` into a window this
+project created: the three progress bars, the LED matrix, the VU strip, both
+logos. The bitmaps come off the user's own disc through the engine's own
+`ALoad`, which decompresses them, builds a DIB section and hands the graphics
+DLL a live device context.*
+
+Audio, meanwhile, is real: `DPlayFile("DINTRO.PXD", 0, 9)` streams through
+DirectSound and the default endpoint meter peaks at 0.42 with the engine volume
+at 10%, 0.20 at 5%, 0.08 at 2%. `DGetZeit` advances at 176,400 bytes a second,
+which is 44.1 kHz 16-bit stereo in real time.
+
+```
+host32/build.bat host32/ejay2.c host32/ejay2.exe
+cd <the ejay folder>
+ejay2.exe --ticks 100 --volume 3 --dplay --shot shot.bmp
+```
+
+None of that was reachable until `Dancejay.exe` gave up its call sites. It is
+VB5 native, so it imports `MSVBVM50` and nothing else and appears never to touch
+either DLL; `tools/vb_declares.py` recovers the 217 lazy-resolution thunks VB
+emits instead and disassembles every call to them. That is where the real
+start-up order came from - `ATyp(3)` **before** `ADevice(0)` **before**
+`AInit(hwnd)`, none of it the 1997 order - along with `ALoad`'s record layout
+and the fact that `ADevice` and `AInit` return **0 for success**, not failure.
+[EJAY2](docs/EJAY2.md) has the rest.
+
+The intro animation stalls about 3.4 seconds in, at the point where the DLL
+starts drawing the 24 VU elements. Those want their coordinates registered first
+through `GFX_IntroSetKey`, from eJay's own layout files - `SEITEN` names every
+control, `K_640` gives ten numbers each - and that is the next piece.
+
 **The 1997 engine initialises and runs.** `DANCE02.DLL` is lifted whole -
 30,904 bytes of 16-bit machine code into 1,244 C functions - `LibMain`
 succeeds, and `AInit` executes 2,822 lifted functions on its way through the

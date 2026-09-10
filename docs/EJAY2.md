@@ -1,45 +1,204 @@
-# Dance eJay 2 engine: PXD32D4.DLL call signatures
+# Dance eJay 2: reading a program that hides its own calls
 
-Argument sizes read out of the binary rather than guessed: a `__stdcall`
-callee ends `ret N`, so N is the argument bytes. This matters - `AInit` and
-`DPlayFile` take **no** arguments, and passing one leaks four bytes of stack
-per call because the callee never pops it, which is how the first host here
-segfaulted.
+The 1999 application splits into three pieces: `Dancejay.exe` (Visual Basic 5,
+native-compiled), `PXD32D4.DLL` (audio) and `PXD32CL1.DLL` (graphics). Both DLLs
+are ordinary 32-bit code importing only DLLs Windows still ships, so they load
+and run today as they are. The interesting problem was never getting them to
+load - it was working out how to call them.
+
+## Dancejay.exe does not import the DLLs it uses
+
+Its import table lists `MSVBVM50.DLL` and `KERNEL32.DLL`, nothing else. It
+still calls 143 functions across the two eJay DLLs, plus gdi32 and kernel32
+directly, because VB's `Declare Function` is resolved lazily through a thunk the
+compiler emits per API:
+
+```
+    A1 <cache>          mov  eax, [cache]       ; resolved address, or null
+    0B C0 74 02 FF E0   or / jz / jmp eax       ; fast path
+    68 <descriptor>     push offset descriptor  ; {dll*, proc*, flags, cache}
+    B8 <resolver> FF D0 call resolver
+    FF E0               jmp  eax
+```
+
+The descriptor holds pointers to the DLL name and the export name, so the thunk
+address maps back to a name, and every `call <thunk>` in the program is a call
+to that export with its arguments pushed in front of it. `tools/vb_declares.py`
+recovers all 217 thunks and disassembles their call sites.
+
+That turns guesswork into reading. Everything below came out of it.
+
+## The start-up order is not the 1997 one
+
+```
+ATyp(3) -> ADevice(0) -> AInit(hwnd) -> GFX_AnimationSwapInit(400, 400)
+```
+
+`ATyp` first is the part that matters: it selects the engine profile (values
+under 100 land in one global, 100-199 and 200-299 in two others), and `ADevice`
+probes formats against it. The 1997 order - `AInit` first - leaves the profile
+unset.
+
+Two return values also read backwards if you assume booleans:
+
+- **`ADevice(0)` returns a format tier, not a device count.** It calls
+  `waveOutGetNumDevs`, walks the devices asking `waveOutGetDevCaps` for a
+  particular `dwSupport` bit, then tries `waveOutOpen` with `WAVE_FORMAT_QUERY`
+  on 44100Hz/16-bit/stereo. Success returns **0**. The 1997 engine returned a
+  count, so a zero here looked like "no devices" when it means "your card takes
+  the best format I have".
+- **`AInit(hwnd)` returns the engine error word.** 0 is success.
+
+`AInit` takes the window handle - the same global `AFenster` writes. An earlier
+pass here read it as taking nothing, from a `ret` that a desynced linear
+disassembly found in the middle of a jump table. `tools/dll_signatures.py`
+walks the control-flow graph instead and reports an export as unknown rather
+than guessing when the walk finds two different purge values.
+
+## ALoad is the whole art pipeline
+
+```c
+typedef struct {
+    int   hdc;      /* out: memory DC with the DIB selected */
+    int   w, h;     /* out: biWidth, biHeight               */
+    void *bits;     /* out: DIB section pixels              */
+    void *pal;      /* out: the 256-entry colour table      */
+    char  name[220];/* in:  filename, a VB fixed string     */
+} ALOADREC;
+```
+
+`ALoad(&rec)` opens the file, checks for the `SZDD` magic and routes through
+`LZOpenFile`/`LZRead` if it finds it (three of the `GRAFIKA` files are
+compressed), parses the BMP header, `CreateDIBSection`s it, reads the pixels and
+selects it into a fresh `CreateCompatibleDC`. The graphics DLL never sees a
+file: it is handed a live DIB. Every `GFX_*Init*` call is
+`(rec.hdc, rec.w, rec.h, rec.bits)`, and `GFX_IntroInitScreen` adds `rec.pal`.
+
+## The UI is data, not form code
+
+`SEITEN` ("pages") names every screen and its controls; `K_640`, `K_800`,
+`K_1024`, `K_1152` and `K_1280` give ten numbers per control per resolution;
+`FONTS` gives the typefaces per resolution; the `GRAFIK*` folders hold the
+bitmaps with their extensions stripped. So the workspace layout is a text file,
+not compiled VB - which is the good news for rebuilding it.
+
+```
+:Hauptbild        EJAY01 EJAY02       the workspace
+:Drumpads         :Mixer  :Timestretch  :Effect  :Soundgruppen
+:Splashscreen     EJAY30
+:Intro            EJAY31 EJAY33 EJAY32
+```
+
+## Sound comes out over DirectSound
+
+`PXD32D4` imports `waveOutOpen`, `waveOutSetVolume`, the mixer calls and
+`timeGetTime` - but no `waveOutWrite`. It enumerates and sets levels through
+winmm and then plays through DirectSound (`ole32.CoCreateInstance`, with an
+`ADSoff` export to turn it off again). Two consequences:
+
+- `waveOutSetVolume` does not govern what you hear.
+- **`ALautSet` is 0..32768 on an exponential curve, not a percentage.** The
+  argument is divided by 32768, fed through `exp()`, scaled and inverted into a
+  0..65535 DirectSound attenuation. `ALautSet(10)` is silence, not a tenth -
+  a "quiet" bring-up run that passes a percentage straight through proves
+  nothing, because nothing was ever audible.
+
+Direct file playback, which is how eJay 2 previews a sample, is:
+
+```
+AFenster(hwnd) -> DStart(0) -> DPlayFile(path, 0, channel)
+```
+
+with `channel` = index + 9 in the original, twelve of them. `DPlayUpdate()` on a
+clock, `DPlayFileCheck(channel)` for done, `DGetZeit(channel)` for position -
+which is a byte offset into a 44100Hz 16-bit stereo stream and advances at
+176,400 a second, i.e. in real time.
+
+Measured on the default endpoint with `IAudioMeterInformation`, playing
+`DINTRO.PXD`: peak 0.08 at `ALautSet(2%)`, 0.20 at 5%, 0.42 at 10%. The engine
+is decoding and streaming, and the level tracks the knob.
+
+## GFX_IntroRefresh takes a timestamp
+
+Not a page number. The DLL compares its argument against 0xd48, 0xfb9, 0x1770,
+0x1ac2, 0x1c75, 0x50dc, 0x5d8e and 0x7148 - milliseconds into a 29-second
+sequence, with `OffsetRect` and a `rand() & 3` jitter driving the panels. Feed
+it real elapsed time, the way Dancejay's form timer does.
+
+It draws by `GetDC`-ing the window handed to `GFX_SetActiveWindow` and blitting
+straight into it, so the host must not let Windows erase the client area
+(`WM_ERASEBKGND` returns 1, no class background brush).
+
+## Signatures
+
+Argument counts from `tools/dll_signatures.py`, cross-checked against the VB
+call sites where one exists.
+
+### PXD32D4.DLL - 87 exports
 
 | export | args | export | args | export | args |
 |---|---:|---|---:|---|---:|
-| `ABilder` | 28 | `ABildpos` | 4 | `AClose` | 4 |
-| `ACloseAll` | 0 | `ADSoff` | 0 | `ADevice` | 4 |
-| `AEnd` | 0 | `AExit` | 0 | `AExport` | 8 |
-| `AFenster` | 4 | `AGetFree` | 4 | `AGetFull` | 4 |
-| `AGetInput` | 0 | `AGetString` | 8 | `AGetTime` | 4 |
-| `AInit` | 0 | `ALautGet` | 4 | `ALautSet` | 4 |
-| `ALoad` | 0 | `AMemory` | 0 | `AMitte` | 8 |
-| `ANummer` | 0 | `APlay` | 48 | `APos` | 4 |
-| `ARecDuplex` | 4 | `ARecInit` | 4 | `ARecInput` | 4 |
-| `ARecPegel` | 4 | `ARecPlay` | 0 | `ARecStart` | 0 |
-| `ARecStop` | 0 | `ARecTest` | 4 | `ARecTimer` | 0 |
-| `ASelectMic` | 0 | `ASetCur` | 4 | `ASetFader` | 8 |
-| `ASetPfad` | 4 | `ASetPitch` | 4 | `ASortIn` | 0 |
+| `ABilder` | 7 | `ABildpos` | 1 | `AClose` | 1 |
+| `ACloseAll` | 0 | `ADSoff` | 0 | `ADevice` | 1 |
+| `AEnd` | 0 | `AExit` | 0 | `AExport` | 2 |
+| `AFenster` | 1 | `AGetFree` | 1 | `AGetFull` | 1 |
+| `AGetInput` | 0 | `AGetString` | 2 | `AGetTime` | 1 |
+| `AInit` | 1 | `ALautGet` | 1 | `ALautSet` | 1 |
+| `ALoad` | 1 | `AMemory` | 0 | `AMitte` | 2 |
+| `ANummer` | 0 | `APlay` | 12 | `APos` | 1 |
+| `ARecDuplex` | 1 | `ARecInit` | 1 | `ARecInput` | 1 |
+| `ARecPegel` | 1 | `ARecPlay` | 0 | `ARecStart` | 0 |
+| `ARecStop` | 0 | `ARecTest` | 1 | `ARecTimer` | 0 |
+| `ASelectMic` | 0 | `ASetCur` | 1 | `ASetFader` | 2 |
+| `ASetPfad` | 1 | `ASetPitch` | 1 | `ASortIn` | 1 |
 | `ASortInit` | 0 | `ASortOut` | 0 | `ASortStart` | 0 |
-| `ASortStart2` | 0 | `AStart` | 4 | `AStop` | 0 |
-| `ATest` | 0 | `ATimer` | 0 | `ATyp` | 4 |
-| `AVbInfoCall` | 0 | `AWaveDauer` | 4 | `AWelle` | 12 |
-| `AWellePos` | 4 | `BWaveDauer` | 0 | `DCloseAll` | 0 |
-| `DGetZeit` | 4 | `DPlayFile` | 0 | `DPlayFileCheck` | 4 |
-| `DPlayFileClose` | 4 | `DPlayUpdate` | 0 | `DStart` | 0 |
-| `Debimem` | 0 | `Extra` | 0 | `ExtraAus` | 0 |
-| `Fade` | 0 | `RDrum` | 12 | `REffekt` | 8 |
-| `RGetName` | 8 | `RGetParam` | 4 | `RMenu` | 0 |
-| `RRecoSave` | 4 | `RTimer` | 0 | `RWavToTemp` | 28 |
-| `RWaveFilter` | 4 | `RWaveGetInfo` | 4 | `RWaveGetTime` | 0 |
-| `RWaveLaden` | 0 | `RWaveParam` | 8 | `RWavePause1` | 0 |
-| `RWavePause2` | 0 | `RWavePlay` | 0 | `RWaveRec` | 0 |
-| `RWaveSave` | 0 | `RWaveSetInfo` | 4 | `RWaveStop` | 0 |
-| `RWaveTakt` | 0 | `RWaveTransfer` | 4 | `RpDrum` | 0 |
+| `ASortStart2` | 0 | `AStart` | 1 | `AStop` | 0 |
+| `ATest` | 2 | `ATimer` | 0 | `ATyp` | 1 |
+| `AVbInfoCall` | 1 | `AWaveDauer` | 1 | `AWelle` | 3 |
+| `AWellePos` | 1 | `BWaveDauer` | 3 | `DCloseAll` | 0 |
+| `DGetZeit` | 1 | `DPlayFile` | 3 | `DPlayFileCheck` | 1 |
+| `DPlayFileClose` | 1 | `DPlayUpdate` | 0 | `DStart` | 1 |
+| `Debimem` | 1 | `Extra` | 0 | `ExtraAus` | 0 |
+| `Fade` | 0 | `RDrum` | 3 | `REffekt` | 2 |
+| `RGetName` | 2 | `RGetParam` | 1 | `RMenu` | 0 |
+| `RRecoSave` | 1 | `RTimer` | 0 | `RWavToTemp` | 7 |
+| `RWaveFilter` | 1 | `RWaveGetInfo` | 1 | `RWaveGetTime` | 0 |
+| `RWaveLaden` | 5 | `RWaveParam` | 2 | `RWavePause1` | 0 |
+| `RWavePause2` | 0 | `RWavePlay` | 0 | `RWaveRec` | 1 |
+| `RWaveSave` | 0 | `RWaveSetInfo` | 1 | `RWaveStop` | 0 |
+| `RWaveTakt` | 0 | `RWaveTransfer` | 1 | `RpDrum` | 3 |
 
-87 exports. 27 of them carry the same names as the 1997 engine.
+27 of these carry the same names as the 1997 engine. Widths doubled in the port
+as expected from 16- to 32-bit - `APlay` takes 12 arguments here against 6 in
+`DANCE02.DLL` - while `ABilder` stayed at 7 and `ATimer` and `ASortStart` take
+nothing in both.
 
-Widths doubled in the port, as expected from 16- to 32-bit: `APlay` is 48
-bytes here against 24 in `DANCE02.DLL`. Others are unchanged - `ABilder` is
-28 in both, `ATimer` and `ASortStart` take nothing in both.
+### PXD32CL1.DLL - 23 exports
+
+| export | args | export | args | export | args |
+|---|---:|---|---:|---|---:|
+| `GFX_AnimationPhase` | 11 | `GFX_AnimationSwapInit` | 2 | `GFX_IntroClose` | 0 |
+| `GFX_IntroDoScrCapture` | 0 | `GFX_IntroInitLeds` | 4 | `GFX_IntroInitScreen` | 5 |
+| `GFX_IntroInitScreenCopy` | 4 | `GFX_IntroInitSplash` | 4 | `GFX_IntroInitText` | 4 |
+| `GFX_IntroRefresh` | 1 | `GFX_IntroSetKey` | 11 | `GFX_IntroShowSplash` | 0 |
+| `GFX_SampleAddTexturePair` | 6 | `GFX_SampleClose` | 0 | `GFX_SampleInit` | 7 |
+| `GFX_SampleZeichne` | 7 | `GFX_SampleZeichneSel` | 7 | `GFX_SetActiveWindow` | 1 |
+| `GFX_VolBarClose` | 0 | `GFX_VolBarDraw` | 3 | `GFX_VolBarGetCount` | 0 |
+| `GFX_VolBarInit` | 4 | `GFX_VolBarRemove` | 1 | | |
+
+`GFX_IntroInitSplash` and `GFX_IntroShowSplash` have no call site in
+Dancejay.exe - the splash belongs to `LOADER.EXE`.
+
+## Running it
+
+`host32/ejay2.exe` drives all of the above. It has to be built 32-bit (the DLLs
+are), from the eJay folder so the relative bitmap paths resolve:
+
+```
+host32/build.bat host32/ejay2.c host32/ejay2.exe
+cd <ejay folder>
+ejay2.exe --ticks 2000 --volume 3 --dplay --shot out.bmp
+```
+
+`--volume` is a percentage and is scaled into `ALautSet`'s 0..32768 before it
+gets there. Keep it low.
