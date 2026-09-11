@@ -185,6 +185,23 @@ static HFILE WINAPI log_openfile(LPCSTR name, LPOFSTRUCT of, UINT style)
     return h;
 }
 
+/* Counting the GDI the graphics DLL does is the only way to tell a draw loop
+ * that is too long from a wait that is too patient. */
+static long g_n_bitblt, g_n_patblt, g_n_setpixel;
+static BOOL (WINAPI *g_real_bitblt)(HDC, int, int, int, int, HDC, int, int, DWORD);
+static BOOL (WINAPI *g_real_patblt)(HDC, int, int, int, int, DWORD);
+static COLORREF (WINAPI *g_real_setpixel)(HDC, int, int, COLORREF);
+
+static BOOL WINAPI count_bitblt(HDC d, int x, int y, int w, int h,
+                                HDC sd, int sx, int sy, DWORD rop)
+{ g_n_bitblt++; return g_real_bitblt(d, x, y, w, h, sd, sx, sy, rop); }
+
+static BOOL WINAPI count_patblt(HDC d, int x, int y, int w, int h, DWORD rop)
+{ g_n_patblt++; return g_real_patblt(d, x, y, w, h, rop); }
+
+static COLORREF WINAPI count_setpixel(HDC d, int x, int y, COLORREF c)
+{ g_n_setpixel++; return g_real_setpixel(d, x, y, c); }
+
 static int patch_import(HMODULE mod, const char *dll, const char *fn,
                         void *repl, void **orig)
 {
@@ -1068,7 +1085,7 @@ int main(int argc, char **argv)
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
     int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
     int seq = 0, trace_files = 0, song = 0, selftest = 0;
-    int probe_ms = -1, probe_key = 0, dragtest = 0;
+    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, no_init = 0;
     const char *libdir = NULL;
     /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
     int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
@@ -1095,8 +1112,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--trace-files")) trace_files = 1;
         else if (!strcmp(argv[i], "--selftest")) selftest = 1;
         else if (!strcmp(argv[i], "--refresh") && i + 1 < argc) probe_ms = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--probekey")) probe_key = 1;
+        else if (!strcmp(argv[i], "--probekey") && i + 1 < argc) probe_key = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dragtest")) dragtest = 1;
+        else if (!strcmp(argv[i], "--init1")) first_minus1 = 1;
+        else if (!strcmp(argv[i], "--no-introinit")) no_init = 1;
         else if (!strcmp(argv[i], "--group") && i + 1 < argc) g_group = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-intro")) intro = 0;
         else if (!strcmp(argv[i], "--main")) { main_screen = 1; intro = 0; }
@@ -1175,9 +1194,46 @@ int main(int argc, char **argv)
     fn_i_4 InitText   = g_gfx ? (fn_i_4) GetProcAddress(g_gfx, "GFX_IntroInitText") : NULL;
     fn_i_i Refresh    = g_gfx ? (fn_i_i) GetProcAddress(g_gfx, "GFX_IntroRefresh") : NULL;
 
+    if (intro && g_gfx) {
+        patch_import(g_gfx, "GDI32.dll", "BitBlt",
+                     (void *)count_bitblt, (void **)&g_real_bitblt);
+        patch_import(g_gfx, "GDI32.dll", "PatBlt",
+                     (void *)count_patblt, (void **)&g_real_patblt);
+        patch_import(g_gfx, "GDI32.dll", "SetPixel",
+                     (void *)count_setpixel, (void **)&g_real_setpixel);
+    }
+
     if (intro && ALoad && InitScreen) {
         ALOADREC scr, leds, text;
         char path[MAX_PATH];
+
+        /* Register the intro's own elements. SEITEN lists 58 of them under
+         * `:Intro` - the LED field, three progress bars and their percentages,
+         * three lines of text and twenty-four VU segments - and K_640 gives
+         * each a name and ten numbers. GFX_IntroSetKey takes exactly that: a
+         * name and ten values. Without them the DLL reaches the point where it
+         * would draw those VU segments with nothing to draw them from, which is
+         * where the animation was stopping. */
+        fn_setkey SetKey = (fn_setkey) GetProcAddress(g_gfx, "GFX_IntroSetKey");
+        int keys = 0;
+        if (SetKey && load_keys("K_640")) {
+            for (int i = 0; i < g_ctrl_n; i++) {
+                const KCTRL *c = &g_ctrl[i];
+                if (strncmp(c->name, "K_INTRO", 7)) continue;
+                const int *n = c->raw;
+                /* The first four arguments are x, y, w, h - the DLL stores
+                 * left=a1, top=a2, right=a1+a3, bottom=a2+a4, which a memory
+                 * diff across one call says plainly. In a K_640 record the size
+                 * is the LAST pair, not the second, so passing the ten numbers
+                 * in file order hands it the source coordinates as a width. */
+                SetKey(c->name, n[0] / KSCALE, n[1] / KSCALE,
+                       n[8] / KSCALE, n[9] / KSCALE,
+                       n[2] / KSCALE, n[3] / KSCALE, n[4] / KSCALE,
+                       n[5] / KSCALE, n[6] / KSCALE, n[7] / KSCALE);
+                keys++;
+            }
+        }
+        printf("  GFX_IntroSetKey x%d\n", keys);
 
         /* Off by default: it grabs the whole desktop and does not come back
          * promptly on a modern display. */
@@ -1205,34 +1261,52 @@ int main(int argc, char **argv)
             printf("  GFX_IntroInitText          -> %d\n",
                    InitText(text.hdc, text.w, text.h, text.bits));
 
-        /* Register the intro's own elements. SEITEN lists 58 of them under
-         * `:Intro` - the LED field, three progress bars and their percentages,
-         * three lines of text and twenty-four VU segments - and K_640 gives
-         * each a name and ten numbers. GFX_IntroSetKey takes exactly that: a
-         * name and ten values. Without them the DLL reaches the point where it
-         * would draw those VU segments with nothing to draw them from, which is
-         * where the animation was stopping. */
-        fn_setkey SetKey = (fn_setkey) GetProcAddress(g_gfx, "GFX_IntroSetKey");
-        int keys = 0;
-        if (SetKey && load_keys("K_640")) {
-            for (int i = 0; i < g_ctrl_n; i++) {
-                const KCTRL *c = &g_ctrl[i];
-                if (strncmp(c->name, "K_INTRO", 7)) continue;
-                const int *n = c->raw;
-                SetKey(c->name, n[0] / KSCALE, n[1] / KSCALE, n[2] / KSCALE,
-                       n[3] / KSCALE, n[4] / KSCALE, n[5] / KSCALE,
-                       n[6] / KSCALE, n[7] / KSCALE, n[8] / KSCALE,
-                       n[9] / KSCALE);
-                keys++;
-            }
-        }
-        printf("  GFX_IntroSetKey x%d\n", keys);
+        /* -1 is the first-time init, and it is not optional. With the object's
+         * "started" byte at +0x368 still clear, -1 is the only argument that
+         * reaches the branch which sets it; every other value walks straight
+         * into the animation with its elements never prepared, and the fill
+         * routine then runs a software pixel loop off a zero rectangle. That is
+         * the 92-second stall - not a hang, and not drawing either: 24 BitBlts
+         * in 83 seconds. Just one call that should not have been the first. */
+        if (Refresh && !no_init)
+            printf("  GFX_IntroRefresh(-1) init  -> %d\n", Refresh(-1));
+
         /* Distinctive values into one element, then read the rect back: the
          * only way to learn which of the ten arguments become which corner. */
         if (SetKey && probe_key) {
-            SetKey("K_INTRO_VU01", 11, 22, 33, 44, 55, 66, 77, 88, 99, 110);
-            const int *r = (const int *)((const char *)g_gfx + 0x2EAC8 + 0x7990 + 0x34);
-            printf("  probe: VU01 rect %d,%d .. %d,%d\n", r[0], r[1], r[2], r[3]);
+            /* Guessing the object layout got nowhere, so ask the memory
+             * instead: feed in ten values that cannot occur naturally, then
+             * sweep the DLL's data for them. Wherever they land is where the
+             * rect goes, and which ones land tells us the argument order. */
+            /* The arguments are combined before they are stored, so matching
+             * markers only finds the ones that pass through untouched. Diff the
+             * whole image across the call instead: every dword that moves is
+             * somewhere SetKey writes, whatever arithmetic it did first. */
+            const char *gb = (const char *)g_gfx;
+            IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)gb;
+            IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(gb + dos->e_lfanew);
+            DWORD span = nt->OptionalHeader.SizeOfImage;
+            int *before = (int *)malloc(span);
+            memcpy(before, gb, span);
+            /* Two different names: if the slot is chosen by name, two
+             * different addresses move. If the same one moves twice, the name
+             * is not selecting anything and the elements must be created by
+             * something else first. */
+            enum { MARK = 31000 };
+            SetKey(probe_key == 2 ? "K_INTRO_VU02" : "K_INTRO_VU01",
+                   MARK + 1, MARK + 2, MARK + 3, MARK + 4,
+                   MARK + 5, MARK + 6, MARK + 7, MARK + 8, MARK + 9, MARK + 10);
+            int shown = 0;
+            for (DWORD off = 0; off + 4 <= span && shown < 40; off += 4) {
+                int a0 = before[off / 4], a1 = *(const int *)(gb + off);
+                if (a0 == a1) continue;
+                printf("    +%06lX  %d -> %d", (unsigned long)off, a0, a1);
+                if (a1 > MARK && a1 <= MARK + 10) printf("   = arg%d", a1 - MARK);
+                putchar('\n');
+                shown++;
+            }
+            if (!shown) printf("    SetKey wrote nothing at all\n");
+            free(before);
         }
         /* Read the rects back out of the DLL. The intro object is a static at
          * base+0x2EAC8; its twenty-four VU elements live at +0x7990, 0x60
@@ -1457,10 +1531,34 @@ int main(int argc, char **argv)
      * thresholds in it and only one of the bands is slow, so the way to find
      * which is to ask rather than to read. */
     if (probe_ms >= 0 && Refresh) {
+        patch_import(g_gfx, "GDI32.dll", "BitBlt",
+                     (void *)count_bitblt, (void **)&g_real_bitblt);
+        patch_import(g_gfx, "GDI32.dll", "PatBlt",
+                     (void *)count_patblt, (void **)&g_real_patblt);
+        patch_import(g_gfx, "GDI32.dll", "SetPixel",
+                     (void *)count_setpixel, (void **)&g_real_setpixel);
+        /* Dump one element before the call. The routine that eats the time is
+         * a software pixel loop, not GDI - 24 BitBlts in 83 seconds - and its
+         * iteration count comes out of these fields. */
+        {
+            const char *e = (const char *)g_gfx + 0x2EAC8 + 0x7990;
+            for (int f = 0; f < 0x60; f += 4) {
+                int v = *(const int *)(e + f);
+                float fv = *(const float *)(e + f);
+                if (v) printf("    element0 +%02X  %11d  %g\n", f, v, fv);
+            }
+        }
+        /* -1 is the first-time init: with the "started" byte at +0x368 still
+         * clear, that is the only argument that reaches the branch which sets
+         * it, and every other value walks straight into the animation with the
+         * elements never having been prepared. */
+        if (first_minus1) printf("    Refresh(-1) -> %d\n", Refresh(-1));
         DWORD t = GetTickCount();
         int rc = Refresh(probe_ms);
         printf("  Refresh(%d) -> %d in %lu ms\n", probe_ms, rc,
                (unsigned long)(GetTickCount() - t));
+        printf("    BitBlt %ld, PatBlt %ld, SetPixel %ld\n",
+               g_n_bitblt, g_n_patblt, g_n_setpixel);
         return 0;
     }
     float peak = 0.0f;
@@ -1596,6 +1694,9 @@ int main(int argc, char **argv)
         Sleep(16);
     }
     printf("  endpoint peak during run   -> %.4f\n", peak);
+    if (g_n_bitblt || g_n_patblt || g_n_setpixel)
+        printf("  graphics DLL did BitBlt %ld, PatBlt %ld, SetPixel %ld\n",
+               g_n_bitblt, g_n_patblt, g_n_setpixel);
     /* Keep the envelope, not just the maximum. Static sits flat near full
      * scale; a loop has a beat in it, and the difference is visible in one
      * column of asterisks without anyone having to listen to it first. */

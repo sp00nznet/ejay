@@ -154,16 +154,22 @@ The start-up **system check** renders too, through the `GFX_Intro*` family:
 *The loading screen, drawn by the same DLL: three progress bars, the LED matrix,
 the VU strip, both logos.*
 
-It stalls, and the stall is now located exactly: `GFX_IntroRefresh(3000)`
-returns in 0 ms, `GFX_IntroRefresh(3500)` takes **94 seconds**. That band runs a
-fill routine once per VU segment, twenty-four times, and each fill takes its
-count from `rand() & 0x7FFF` - up to 32,767 - which it is meant to clamp against
-the segment's own rectangle. Those rectangles are zero, so nothing clamps.
-`GFX_IntroSetKey` is what should fill them in, and it does take exactly a control
-name plus the ten numbers `K_640` holds; feeding it all 58 registers them
-without complaint and the rectangles stay zero, so either the argument order is
-wrong or something has to create the elements first. [EJAY2](docs/EJAY2.md) has
-the detail.
+**The 92-second stall is fixed, and it was one missing call.**
+`GFX_IntroRefresh(3000)` returned in 0 ms and `GFX_IntroRefresh(3500)` took 92
+seconds - never a hang. It was not drawing either: 24 BitBlts and 1 PatBlt in 83
+seconds, so the time went into a software pixel loop inside the DLL whose
+iteration count comes from element fields that were all zero.
+
+`GFX_IntroRefresh(-1)` is the first-time init. With the object's "started" byte
+still clear, -1 is the only argument that reaches the branch which sets it;
+every other value walks straight into the animation with its elements never
+prepared. Call it once first and the whole 29-second timeline runs clean.
+
+It does not show anything yet - after the init the per-frame path draws (13
+BitBlts, 447 PatBlts over 400 frames) but the result stays black, because the
+intro expects the application to feed it progress and level values and nothing
+here does. `--no-introinit` gets the old behaviour, which is where the
+screenshot above came from. [EJAY2](docs/EJAY2.md) has the rest.
 
 Still to do: the transport buttons do not do anything yet beyond lighting up;
 the status word `APlay` is handed never moves off 99 even though the sample

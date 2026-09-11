@@ -297,31 +297,68 @@ The browser's own geometry comes from the same table rather than from a ruler:
 the strip beside it. Measuring it by eye put the list 14 pixels too high, over
 the transport bar.
 
-## The intro stall, located
+## The intro stall: one call that should not have been the first
 
-`GFX_IntroRefresh(3000)` returns in 0 ms. `GFX_IntroRefresh(3500)` takes
-**94 seconds**. So it is not a hang, and it is one call in one band - the one
-past 0xd48.
+`GFX_IntroRefresh(3000)` returns in 0 ms. `GFX_IntroRefresh(3500)` took
+**92 seconds**. So it was never a hang, and it was one call in one band - the
+one past 0xd48.
 
-What that band does is 24 iterations of a fill routine, once per VU segment:
+It was not drawing either, which is the part that redirected the search:
+counting the graphics DLL's own GDI calls across that one Refresh gives **24
+BitBlts and 1 PatBlt in 83 seconds**. Twenty-five GDI calls cannot take a minute
+and a half. What eats the time is a software pixel loop inside the DLL -
+`movsd`, byte shifts, `ror` - blending two pixels an iteration, and its
+iteration count comes out of the element's own fields.
+
+Those fields were zero: the twenty-four VU elements at `intro+0x7990` (0x60
+apart) had a zero rectangle at +0x34 and a zero float scale at +0x44. Nothing
+clamped the loop.
+
+**The fix is `GFX_IntroRefresh(-1)` as the first call.** Reading the dispatch at
+the top of the function:
 
 ```
-lea edi, [esi+0x7990]        ; 24 elements, 0x60 apart
-mov ebx, 0x18
-loop:  rand(); fill(edi, rand_result); edi += 0x60; dec ebx; jnz loop
+mov  edi, [ebp+8]
+cmp  edi, -1
+je   first_time            ; -1 goes here
+mov  al, [esi+0x368]       ; "started" byte
+test al, al
+je   animate               ; not -1 and never started -> straight into the body
+...
+first_time:
+  [esi+0x368] = 1; [esi+0x8418] = 1; [esi+0x8419] = 0; [esi+0x80] = 0
+  return 1
 ```
 
-and the fill takes its count from `rand() & 0x7FFF` - up to 32,767 - which it is
-meant to clamp against the element's own rectangle at `+0x34..+0x40`. Those
-rectangles are zero, so nothing clamps, and 24 x 32,767 GDI operations is a
-minute and a half.
+With the started byte clear, **-1 is the only argument that reaches the branch
+which sets it.** Any other value walks straight into the animation with the
+elements never prepared. Call it once first and the whole 29-second timeline
+runs without a stall - every Refresh returns 1, start to finish.
 
-`GFX_IntroSetKey` is what should fill them in: it packs its ten numbers into a
-RECT, builds a `std::string` from the name and hands both to the intro object,
-which holds all 57 `K_INTRO_*` names in its own data and so matches by name.
-Feeding it `K_640`'s ten numbers registers 58 elements without complaint - and
-the rectangles stay zero. So either the argument order is wrong or the elements
-have to be created by something else first. That is where it stands.
+What it does not yet do is show anything: after the proper init the per-frame
+path is a different routine, it draws (13 BitBlts and 447 PatBlts over 400
+frames, so it is working), and the result stays black. The intro expects to be
+fed its progress and level values by the application, and nothing here feeds
+them. `--no-introinit` skips the init and gets the old behaviour - the system
+check screen painted once, then the stall - which is where the screenshot above
+came from.
+
+## GFX_IntroSetKey stores a rect per name
+
+Eleven arguments: a name and ten numbers. The first four are **x, y, w, h** -
+the DLL stores `left = a1, top = a2, right = a1 + a3, bottom = a2 + a4`. In a
+`K_640` record the size is the *last* pair, not the second, so handing it the
+ten numbers in file order gives it a source coordinate as a width.
+
+The rect lands at `intro+0x8290 + index*0x10`, and the index comes from the
+name: `K_INTRO_VU01` writes at +0x8290, `K_INTRO_VU02` at +0x82A0. The DLL
+carries all 57 `K_INTRO_*` strings in its own data to do that lookup; `K_640`
+lists 58, the extra being `K_INTRO_REGLER`.
+
+None of that was readable from the disassembly with any confidence. What settled
+it was diffing the DLL's whole image across a single call with ten values that
+could not occur naturally - every dword that moves is somewhere SetKey writes,
+whatever arithmetic it did on the way.
 
 ## GFX_IntroRefresh takes a timestamp## GFX_IntroRefresh takes a timestamp
 
