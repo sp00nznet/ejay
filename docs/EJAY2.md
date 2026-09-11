@@ -343,6 +343,33 @@ them. `--no-introinit` skips the init and gets the old behaviour - the system
 check screen painted once, then the stall - which is where the screenshot above
 came from.
 
+## What feeds the intro: nothing, and that is the point
+
+There is no value setter in the graphics DLL. The whole intro surface is
+`GFX_IntroDoScrCapture`, `GFX_IntroInitScreen`, `GFX_IntroInitScreenCopy`,
+`GFX_IntroInitLeds`, `GFX_IntroInitText`, `GFX_IntroInitSplash`,
+`GFX_IntroShowSplash`, `GFX_IntroSetKey`, `GFX_IntroRefresh` and
+`GFX_IntroClose`. No `SetProgress`, no `SetLevel`, no per-element value at all -
+and `Dancejay.exe` has exactly one `GFX_IntroSetKey` call site, inside the loop
+that walks the coordinate table.
+
+So the elements animate themselves off the timestamp `GFX_IntroRefresh` is
+given. The progress bars fill because time passed, not because anybody told
+them a percentage. That is why fixing the first call fixed the timeline: it was
+never waiting to be fed, it was walking into an animation it had not been told
+to start.
+
+`GFX_AnimationPhase` is not it either - its eleven arguments come off a
+0x1CC-stride record array in the application, and its two call sites are in the
+workspace, not the intro.
+
+What is still wrong is separate: after the correct init the per-frame path draws
+(13 BitBlts and 447 PatBlts over 400 frames) and the result stays black. The
+next suspect is `GFX_IntroInitScreenCopy`. Dancejay calls it two ways - with the
+screen's own DC and a null pixel pointer when the display is deeper than 8bpp,
+and otherwise with a *second* bitmap loaded into its own record at `Me+0x5E8`.
+This host only ever does the first.
+
 ## GFX_IntroSetKey stores a rect per name
 
 Eleven arguments: a name and ten numbers. The first four are **x, y, w, h** -

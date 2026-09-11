@@ -427,13 +427,39 @@ static int load_mix_names(const char *path)
  * GFX_SampleZeichne draws the same list into the same lanes, so what is on the
  * screen is what is playing rather than a picture of what might be. */
 typedef struct { int lane, bar, bars, lib; } SLOT;
-static SLOT g_song[64] = {   /* room to add more by hand from the browser */
-    { 0,  0, 4, 0 }, { 0,  8, 4, 0 }, { 1,  2, 4, 1 }, { 1, 10, 4, 1 },
-    { 2,  0, 2, 2 }, { 2,  4, 2, 2 }, { 2,  8, 2, 2 }, { 2, 12, 2, 2 },
-    { 3,  4, 4, 3 }, { 4,  0, 8, 4 }, { 5,  6, 4, 5 }, { 6,  8, 4, 6 },
-    { 7, 12, 4, 7 },
+static SLOT g_song[64];
+static int  g_song_n;
+
+/* The arrangement as written rather than as indexed: a lane, a bar, and which
+ * sound group to take the sample from. Resolving it after the index is read
+ * means the blocks get the samples' real lengths, and picking across groups
+ * means the demo is a beat with something over it rather than nine variations
+ * of the same pad - which is what indices 0..7 of group 0 happen to be, and why
+ * it was barely audible. */
+typedef struct { int lane, bar, grp, idx; } SEED;
+static const SEED g_seed[] = {
+    { 0,  0, 3, 0 }, { 0,  8, 3, 0 },          /* "lasting / complete", 4 bars */
+    { 1,  2, 0, 0 }, { 1,  6, 0, 1 },          /* "Grp. 1" loops, 2 bars       */
+    { 1, 10, 0, 0 }, { 1, 14, 0, 1 },
+    { 2,  0, 5, 2 }, { 2,  4, 5, 2 },          /* claps on the four            */
+    { 2,  8, 5, 2 }, { 2, 12, 5, 2 },
+    { 3,  4, 6, 1 },                           /* "Happy Hyp" pad, 8 bars      */
+    { 4,  8, 8, 0 }, { 4, 12, 8, 2 },          /* a vocal, and an answer       */
 };
-static int g_song_n = 13;    /* how many of those are real, so far */
+
+static void build_song(void)
+{
+    g_song_n = 0;
+    for (int i = 0; i < (int)(sizeof(g_seed) / sizeof(g_seed[0])); i++) {
+        const SEED *sd = &g_seed[i];
+        if (sd->grp >= g_grp_n || sd->idx >= g_grp_count[sd->grp]) continue;
+        int lib = g_grp_start[sd->grp] + sd->idx;
+        if (lib >= g_lib_n) continue;
+        SLOT *sl = &g_song[g_song_n++];
+        sl->lane = sd->lane; sl->bar = sd->bar;
+        sl->lib = lib; sl->bars = g_lib[lib].bars;
+    }
+}
 
 /* ---- eJay's own control layout --------------------------------------------
  * `K_640` and its siblings are the coordinate table: a control name, then ten
@@ -584,9 +610,15 @@ static void browser_geometry(void)
     if (c && c->w > 0) { g_scroll_x = c->x; g_scroll_w = c->w; }
 }
 
+/* G_SAMPLE_WINDOW is the panel including its bezel, and text drawn at its very
+ * top and bottom edges sits on the frame. Inset by the bezel. */
+#define BEZEL_T 7
+#define BEZEL_B 6
+#define BEZEL_L 6
+
 static int browser_rows(void)
 {
-    return (int)(g_browse.bottom - g_browse.top - 4) / ROW_H;
+    return (int)(g_browse.bottom - g_browse.top - BEZEL_T - BEZEL_B) / ROW_H;
 }
 
 /* Draw every placed sample into the lanes. Called once at start-up and again
@@ -640,13 +672,15 @@ static void draw_browser(HDC dst)
     SetBkMode(dst, TRANSPARENT);
     /* Clip to the panel: a row that does not fit belongs nowhere, and without
      * this the top one is drawn over the transport bar above it. */
-    HRGN clip = CreateRectRgn((int)g_browse.left, (int)g_browse.top,
-                              (int)g_browse.right, (int)g_browse.bottom);
+    HRGN clip = CreateRectRgn((int)g_browse.left + BEZEL_L,
+                              (int)g_browse.top + BEZEL_T - 1,
+                              (int)g_browse.right - BEZEL_L,
+                              (int)g_browse.bottom - BEZEL_B + 1);
     SelectClipRgn(dst, clip);
 
     for (int r = 0; r < rows && g_scroll + r < gc; r++) {
         int idx = gs + g_scroll + r;
-        int y = (int)g_browse.top + 4 + r * ROW_H;
+        int y = (int)g_browse.top + BEZEL_T + r * ROW_H;
         const SAMPLE *sm = &g_lib[idx];
         if (idx == g_sel) {
             RECT sel = { (int)g_browse.left + 4, y - 1, (int)g_browse.right - 6, y + ROW_H - 1 };
@@ -738,7 +772,12 @@ static void rebuild_arrangement(void)
     fn_i_v ACloseAll = (fn_i_v) GetProcAddress(g_eng, "ACloseAll");
     fn_i_v AStop     = (fn_i_v) GetProcAddress(g_eng, "AStop");
     fn_i_i AStart    = (fn_i_i) GetProcAddress(g_eng, "AStart");
-    if (AStop)     AStop();
+    /* AStop asks the mixer to stop, it does not wait for it. Freeing the track
+     * entries out from under a pass that is still running is a crash, so give
+     * the audio thread a moment to come out before ACloseAll takes them away.
+     * ponytail: a fixed wait. A handshake would be better if one exists. */
+    if (AStop) AStop();
+    Sleep(40);
     if (ACloseAll) ACloseAll();
     for (int i = 0; i < g_song_n && g_aplay; i++) {
         const SLOT *sl = &g_song[i];
@@ -833,7 +872,7 @@ static int browser_input(HWND h, UINT m, WPARAM w, LPARAM l)
             return 1;
         }
         if (x >= (int)g_browse.left && x < (int)g_browse.right && y >= (int)g_browse.top && y < (int)g_browse.bottom) {
-            int r = (y - (int)g_browse.top - 4) / ROW_H;
+            int r = (y - (int)g_browse.top - BEZEL_T) / ROW_H;
             int idx = g_grp_start[g_group] + g_scroll + r;
             if (r >= 0 && r < browser_rows() &&
                 g_scroll + r < g_grp_count[g_group] && idx < g_lib_n) {
@@ -1079,13 +1118,39 @@ static int load_bitmap(fn_i_p ALoad, ALOADREC *rec, const char *name)
     return rec->hdc != 0;
 }
 
+/* A crash in a DLL nobody has source for is only useful if it says where. Name
+ * the module and the offset into it, which is enough to find the function in
+ * the same disassembly everything else here came out of. */
+static LONG WINAPI report_fault(EXCEPTION_POINTERS *ep)
+{
+    void *pc = (void *)ep->ExceptionRecord->ExceptionAddress;
+    HMODULE mod = NULL;
+    char name[MAX_PATH] = "?";
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)pc, &mod);
+    if (mod) GetModuleFileNameA(mod, name, sizeof(name));
+    const char *tail = strrchr(name, '\\');
+    printf("\n!! crash: exception %08lX at %p\n",
+           (unsigned long)ep->ExceptionRecord->ExceptionCode, pc);
+    printf("   in %s + %08lX\n", tail ? tail + 1 : name,
+           mod ? (unsigned long)((char *)pc - (char *)mod) : 0ul);
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
+        printf("   %s address %p\n",
+               ep->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading",
+               (void *)ep->ExceptionRecord->ExceptionInformation[1]);
+    fflush(stdout);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 int main(int argc, char **argv)
 {
+    SetUnhandledExceptionFilter(report_fault);
     setvbuf(stdout, NULL, _IONBF, 0);   /* a crash must not eat the trail */
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
     int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
     int seq = 0, trace_files = 0, song = 0, selftest = 0;
-    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, no_init = 0;
+    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, no_init = 0, flat = 0, limit = 0;
     const char *libdir = NULL;
     /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
     int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
@@ -1114,6 +1179,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--refresh") && i + 1 < argc) probe_ms = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--probekey") && i + 1 < argc) probe_key = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dragtest")) dragtest = 1;
+        else if (!strcmp(argv[i], "--flat") && i + 1 < argc) flat = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--limit") && i + 1 < argc) limit = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--init1")) first_minus1 = 1;
         else if (!strcmp(argv[i], "--no-introinit")) no_init = 1;
         else if (!strcmp(argv[i], "--group") && i + 1 < argc) g_group = atoi(argv[++i]);
@@ -1137,9 +1204,12 @@ int main(int argc, char **argv)
     printf("  %s at %p\n", ENGINE, (void *)g_eng);
     if (g_gfx) printf("  %s at %p\n", GFXDLL, (void *)g_gfx);
 
-    if (libdir)
+    if (libdir) {
         printf("  sample library             -> %d samples under %s\n",
                load_index(libdir), libdir);
+        build_song();
+        printf("  arrangement                -> %d slots\n", g_song_n);
+    }
     meter_open();
     clamp_session(volume);
 
@@ -1391,9 +1461,6 @@ int main(int argc, char **argv)
         /* Keep the handles: the grid is redrawn whenever a sample is added. */
         g_zeich = Zeich; g_griddc = griddc;
         g_tex[0] = tex[0]; g_tex[1] = tex[1]; g_tex[2] = tex[2];
-        for (int i = 0; i < g_song_n; i++)
-            if (g_song[i].lib >= 0 && g_song[i].lib < g_lib_n)
-                g_song[i].bars = g_lib[g_song[i].lib].bars;
         draw_blocks(g_canvas);
         printf("  blocks drawn into the grid -> %d\n", g_song_n);
 
@@ -1500,12 +1567,17 @@ int main(int argc, char **argv)
              * A bar at 120 BPM is 88,200 of them. */
             static short st[64];
             int placed = 0;
-            for (int i = 0; i < g_song_n && i < 64; i++) {
+            for (int i = 0; i < g_song_n && i < 64 && (!limit || i < limit); i++) {
                 const SLOT *sl = &g_song[i];
                 if (sl->lib < 0 || sl->lib >= g_lib_n) continue;
                 st[i] = 0x63;
+                /* flat==1 pins every sample to track 0 at position 0, which
+                 * is the shape that plays at full scale when a single sample is
+                 * placed. If the arrangement is quiet and this is not, the
+                 * fault is in the track or the position, not the samples. */
                 APlay(0, 0, 0, 0, 0, &st[i], g_lib[sl->lib].path,
-                      sl->lane, sl->bar * 88200, 0, 0, 0x100);
+                      flat ? 0 : sl->lane,
+                      flat ? 0 : sl->bar * 88200, 0, 0, 0x100);
                 placed++;
             }
             printf("  APlay x%d across %d tracks\n", placed, g_song_n);
@@ -1591,6 +1663,19 @@ int main(int argc, char **argv)
             browser_input(wnd, WM_LBUTTONUP, 0, MAKELPARAM(x0 + 6 * bw, y));
             printf("  dragtest: now at bar %d (expected %d)\n",
                    g_song[0].bar, 6);
+
+            /* And the gesture that crashed: press on a browser row, drag up
+             * into the track grid, release there. Nothing places a sample that
+             * way yet, but it must not fall over either. */
+            int by = (int)g_browse.top + BEZEL_T + 2 * ROW_H + 4;
+            int bx = (int)g_browse.left + 40;
+            browser_input(wnd, WM_LBUTTONDOWN, 0, MAKELPARAM(bx, by));
+            for (int k = 1; k <= 8; k++)
+                browser_input(wnd, WM_MOUSEMOVE, 0,
+                              MAKELPARAM(bx + k * 20, by - k * 40));
+            browser_input(wnd, WM_LBUTTONUP, 0,
+                          MAKELPARAM(GRID_X0 + 200, GRID_Y0 + 40));
+            printf("  dragtest: browser-to-grid drag survived\n");
         }
         if (seq && RTimer) RTimer();
         if (seq) mute_unless_mixing(*(short *)((char *)g_eng + 0x3AC68));
@@ -1676,6 +1761,10 @@ int main(int argc, char **argv)
             ReleaseDC(wnd, dc);
             g_dirty = 0;
         }
+        /* RTimer and the per-frame drawing together cost about as long as the
+         * sleep does, so pumping once a frame leaves the window feeling stuck
+         * under the mouse. Pump again now the work is done. */
+        pump_messages();
         float p = meter_peak();
         if (p > peak) peak = p;
         if (env_n < (int)(sizeof(env) / sizeof(env[0]))) env[env_n++] = p;
