@@ -261,6 +261,68 @@ Geometry measured off `EJAY01A`: the panel at x 176..539, y 366..472; the button
 lozenges 49 wide at x 112 and x 569, 16 tall, on a 22-pixel pitch from y 346;
 the scroll strip at x 543.
 
+## K_640: eJay's control layout, in a 1280x960 space
+
+`K_640` and its siblings are the coordinate table. Each entry is a control name
+followed by ten numbers:
+
+```
+name   dx dy   s1x s1y   s2x s2y   s3x s3y   w h
+```
+
+`dx,dy` is where the control sits and `w,h` how big it is; the three source
+pairs are its states cut out of `EJAY02` - normal, rolled over, pressed - which
+is what SEITEN means by `RollOverButton`. A two-state control leaves the third
+pair at 0,0 and reuses the second for "on", which is how a selected category
+button lights up.
+
+**Every number is in a 1280x960 space, so the 640x480 art set halves them.**
+That is the thing to know, and it is not obvious: `B_EJAY` is listed at x 1216
+with a width of 63, which reads as nonsense on a 640-pixel screen until you
+halve both and get a 31-pixel button at x 608, hard against the right rail where
+it belongs. The proof is in the sheet - crop `EJAY02A` at the halved source
+coordinates and three states of the eJay logo button come out; crop at the
+unhalved ones and you get bits of three unrelated icons.
+
+`K_640`, `K_800` and `K_1280` being near-identical files is the other tell: the
+numbers do not depend on the resolution, only the rounding does.
+
+591 controls are listed, covering every page. Checking each one's normal state
+against the chrome pixel-for-pixel puts 89 of the `B_*` entries on `:Hauptbild`
+and the rest on the other pages, which is a cheap way to tell which page a
+control belongs to without parsing SEITEN.
+
+The browser's own geometry comes from the same table rather than from a ruler:
+`G_SAMPLE_WINDOW` is x 178..537, y 380..473 once halved, and `K_SAMPLE_VSCROLL`
+the strip beside it. Measuring it by eye put the list 14 pixels too high, over
+the transport bar.
+
+## The intro stall, located
+
+`GFX_IntroRefresh(3000)` returns in 0 ms. `GFX_IntroRefresh(3500)` takes
+**94 seconds**. So it is not a hang, and it is one call in one band - the one
+past 0xd48.
+
+What that band does is 24 iterations of a fill routine, once per VU segment:
+
+```
+lea edi, [esi+0x7990]        ; 24 elements, 0x60 apart
+mov ebx, 0x18
+loop:  rand(); fill(edi, rand_result); edi += 0x60; dec ebx; jnz loop
+```
+
+and the fill takes its count from `rand() & 0x7FFF` - up to 32,767 - which it is
+meant to clamp against the element's own rectangle at `+0x34..+0x40`. Those
+rectangles are zero, so nothing clamps, and 24 x 32,767 GDI operations is a
+minute and a half.
+
+`GFX_IntroSetKey` is what should fill them in: it packs its ten numbers into a
+RECT, builds a `std::string` from the name and hands both to the intro object,
+which holds all 57 `K_INTRO_*` names in its own data and so matches by name.
+Feeding it `K_640`'s ten numbers registers 58 elements without complaint - and
+the rectangles stay zero. So either the argument order is wrong or the elements
+have to be created by something else first. That is where it stands.
+
 ## GFX_IntroRefresh takes a timestamp## GFX_IntroRefresh takes a timestamp
 
 Not a page number. The DLL compares its argument against 0xd48, 0xfb9, 0x1770,

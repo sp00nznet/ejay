@@ -26,6 +26,7 @@
 #include <string.h>
 #include <windows.h>
 #include <mmsystem.h>
+#include <ctype.h>
 
 #define ENGINE "PXD32D4.DLL"
 #define GFXDLL "PXD32CL1.DLL"
@@ -43,6 +44,8 @@ typedef int (__stdcall *fn_i_ii)(int, int);
 typedef int (__stdcall *fn_i_p)(void *);
 typedef int (__stdcall *fn_i_5)(int, int, int, void *, void *);
 typedef int (__stdcall *fn_i_4)(int, int, int, void *);
+typedef int (__stdcall *fn_setkey)(const char *, int, int, int, int, int,
+                                   int, int, int, int, int);
 typedef int (__stdcall *fn_i_pii)(const char *, int, int);
 typedef int (__stdcall *fn_tex)(const char *, const char *, const char *, int, int, int);
 typedef int (__stdcall *fn_sinit)(int, int, int, int, int, const char *, int);
@@ -95,7 +98,7 @@ static FARPROC need(HMODULE h, const char *name)
 
 /* Defined below, with the browser it belongs to: returns 1 if it consumed
  * the message. */
-static int browser_input(UINT m, WPARAM w, LPARAM l);
+static int browser_input(HWND h, UINT m, WPARAM w, LPARAM l);
 
 /* ---- the window the graphics DLL draws into ---------------------------- */
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
@@ -111,7 +114,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         EndPaint(h, &ps);
         return 0;
     }
-    if (browser_input(m, w, l)) return 0;
+    if (browser_input(h, m, w, l)) return 0;
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcA(h, m, w, l);
 }
@@ -415,6 +418,117 @@ static SLOT g_song[64] = {   /* room to add more by hand from the browser */
 };
 static int g_song_n = 13;    /* how many of those are real, so far */
 
+/* ---- eJay's own control layout --------------------------------------------
+ * `K_640` and its siblings are the coordinate table: a control name, then ten
+ * numbers.
+ *
+ *     name   dx dy   s1x s1y   s2x s2y   s3x s3y   w h
+ *
+ * `dx,dy` is where the control sits on screen and `w,h` how big it is; the
+ * three source pairs are its states cut out of `EJAY02` - normal, rolled over,
+ * pressed - which is what SEITEN means by `RollOverButton`. A two-state control
+ * leaves the third pair at 0,0.
+ *
+ * Every number is in a 1280x960 space, so the 640x480 art set halves them.
+ * K_640, K_800 and K_1280 are near-identical files precisely because the
+ * numbers do not depend on the resolution - only the rounding does. Reading
+ * that wrongly puts a 63-pixel button at x 1216 on a 640-pixel screen, which is
+ * how it looked like nonsense the first time.
+ */
+#define KSCALE 2
+
+typedef struct {
+    char name[32];
+    int  x, y, w, h;
+    int  sx[3], sy[3];
+    int  raw[10];        /* unscaled, for the calls that want them as written */
+} KCTRL;
+
+static KCTRL g_ctrl[640];
+static int   g_ctrl_n;
+
+static int load_keys(const char *path)
+{
+    char *buf = slurp(path, NULL);
+    if (!buf) return 0;
+    char *p = buf;
+    while (*p && g_ctrl_n < (int)(sizeof(g_ctrl) / sizeof(g_ctrl[0]))) {
+        /* a name line: starts with a letter */
+        while (*p && (*p == '\r' || *p == '\n' || *p == ' ')) p++;
+        if (!*p) break;
+        if (!isalpha((unsigned char)*p)) {          /* stray number, skip it */
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+        char name[32];
+        int k = 0;
+        while (*p && *p != '\r' && *p != '\n') {
+            if (k + 1 < (int)sizeof(name) && *p != ' ') name[k++] = *p;
+            p++;
+        }
+        name[k] = 0;
+
+        int n[10], got = 0;
+        char *save = p;
+        while (got < 10 && *p) {
+            while (*p == '\r' || *p == '\n' || *p == ' ') p++;
+            if (!*p) break;
+            if (!isdigit((unsigned char)*p) && *p != '-') break;
+            n[got++] = atoi(p);
+            while (*p && *p != '\r' && *p != '\n') p++;
+        }
+        if (got < 10) { p = save; continue; }
+
+        KCTRL *c = &g_ctrl[g_ctrl_n++];
+        snprintf(c->name, sizeof(c->name), "%s", name);
+        c->x = n[0] / KSCALE; c->y = n[1] / KSCALE;
+        c->w = n[8] / KSCALE; c->h = n[9] / KSCALE;
+        for (int i = 0; i < 3; i++) {
+            c->sx[i] = n[2 + i * 2] / KSCALE;
+            c->sy[i] = n[3 + i * 2] / KSCALE;
+        }
+        memcpy(c->raw, n, sizeof(c->raw));
+    }
+    free(buf);
+    return g_ctrl_n;
+}
+
+static const KCTRL *find_ctrl(const char *name)
+{
+    for (int i = 0; i < g_ctrl_n; i++)
+        if (!strcmp(g_ctrl[i].name, name)) return &g_ctrl[i];
+    return NULL;
+}
+
+/* Which control is under the pointer? Only the ones we know how to draw. */
+static int ctrl_at(int x, int y)
+{
+    for (int i = 0; i < g_ctrl_n; i++) {
+        const KCTRL *c = &g_ctrl[i];
+        if (c->name[0] != 'B' || c->name[1] != '_') continue;
+        if (!c->sx[1] && !c->sy[1]) continue;        /* no rollover state */
+        if (x >= c->x && x < c->x + c->w && y >= c->y && y < c->y + c->h)
+            return i;
+    }
+    return -1;
+}
+
+/* Blit one state of one control from the EJAY02 sheet. */
+static void draw_ctrl(HDC dst, const KCTRL *c, int state)
+{
+    if (!c || !g_sheet.hdc) return;
+    if (state && !c->sx[state] && !c->sy[state]) state = 0;
+    if (state == 0) {
+        /* state 0 is simply what the chrome already has */
+        if (g_screen.hdc)
+            BitBlt(dst, c->x, c->y, c->w, c->h,
+                   (HDC)(INT_PTR)g_screen.hdc, c->x, c->y, SRCCOPY);
+        return;
+    }
+    BitBlt(dst, c->x, c->y, c->w, c->h, (HDC)(INT_PTR)g_sheet.hdc,
+           c->sx[state], c->sy[state], SRCCOPY);
+}
+
 /* ---- the browser ---------------------------------------------------------
  * The bottom-centre panel is `G_SAMPLE_WINDOW` in eJay's layout table, with
  * `K_SAMPLE_VSCROLL` down its right edge and twelve `B_GRUPPE_*` buttons either
@@ -435,7 +549,28 @@ static int g_song_n = 13;    /* how many of those are real, so far */
 #define BTN_PITCH 22
 #define SCROLL_X 543
 
-static int browser_rows(void) { return (BROWSE_Y1 - BROWSE_Y0 - 6) / ROW_H; }
+/* The panel is `G_SAMPLE_WINDOW` and the strip beside it `K_SAMPLE_VSCROLL`,
+ * both in eJay's own table - x 178..537, y 380..473 once halved. Taking them
+ * from the table rather than from a ruler is what stops the first row being
+ * drawn over the transport bar above it. */
+static RECT g_browse = { BROWSE_X0, BROWSE_Y0, BROWSE_X1, BROWSE_Y1 };
+static int  g_scroll_x = SCROLL_X, g_scroll_w = 9;
+
+static void browser_geometry(void)
+{
+    const KCTRL *c = find_ctrl("G_SAMPLE_WINDOW");
+    if (c && c->w > 0 && c->h > 0) {
+        g_browse.left = c->x; g_browse.top = c->y;
+        g_browse.right = c->x + c->w; g_browse.bottom = c->y + c->h;
+    }
+    c = find_ctrl("K_SAMPLE_VSCROLL");
+    if (c && c->w > 0) { g_scroll_x = c->x; g_scroll_w = c->w; }
+}
+
+static int browser_rows(void)
+{
+    return (int)(g_browse.bottom - g_browse.top - 4) / ROW_H;
+}
 
 /* Draw every placed sample into the lanes. Called once at start-up and again
  * whenever the arrangement gains a block, so the grid always shows the list
@@ -479,65 +614,181 @@ static void draw_browser(HDC dst)
     if (!dst || !g_screen.hdc) return;   /* clamp only, for the selftest */
 
     /* Repaint the panel from the chrome first, so a scroll does not smear. */
-    BitBlt(dst, BROWSE_X0, BROWSE_Y0, BROWSE_X1 - BROWSE_X0, BROWSE_Y1 - BROWSE_Y0,
-           (HDC)(INT_PTR)g_screen.hdc, BROWSE_X0, BROWSE_Y0, SRCCOPY);
+    BitBlt(dst, (int)g_browse.left, (int)g_browse.top, (int)g_browse.right - (int)g_browse.left, (int)g_browse.bottom - (int)g_browse.top,
+           (HDC)(INT_PTR)g_screen.hdc, (int)g_browse.left, (int)g_browse.top, SRCCOPY);
 
     HFONT fnt = CreateFontA(-10, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                             0, 0, DEFAULT_QUALITY, 0, "Small Fonts");
     HFONT old = (HFONT)SelectObject(dst, fnt);
     SetBkMode(dst, TRANSPARENT);
+    /* Clip to the panel: a row that does not fit belongs nowhere, and without
+     * this the top one is drawn over the transport bar above it. */
+    HRGN clip = CreateRectRgn((int)g_browse.left, (int)g_browse.top,
+                              (int)g_browse.right, (int)g_browse.bottom);
+    SelectClipRgn(dst, clip);
 
     for (int r = 0; r < rows && g_scroll + r < gc; r++) {
         int idx = gs + g_scroll + r;
-        int y = BROWSE_Y0 + 4 + r * ROW_H;
+        int y = (int)g_browse.top + 4 + r * ROW_H;
         const SAMPLE *sm = &g_lib[idx];
         if (idx == g_sel) {
-            RECT sel = { BROWSE_X0 + 4, y - 1, BROWSE_X1 - 6, y + ROW_H - 1 };
+            RECT sel = { (int)g_browse.left + 4, y - 1, (int)g_browse.right - 6, y + ROW_H - 1 };
             HBRUSH hb = CreateSolidBrush(RGB(40, 60, 150));
             FillRect(dst, &sel, hb);
             DeleteObject(hb);
         }
         SetTextColor(dst, idx == g_sel ? RGB(255, 255, 255) : RGB(255, 190, 80));
-        TextOutA(dst, BROWSE_X0 + 8, y, sm->l1, (int)strlen(sm->l1));
+        TextOutA(dst, (int)g_browse.left + 8, y, sm->l1, (int)strlen(sm->l1));
         SetTextColor(dst, idx == g_sel ? RGB(220, 230, 255) : RGB(160, 180, 240));
-        TextOutA(dst, BROWSE_X0 + 140, y, sm->l2, (int)strlen(sm->l2));
+        TextOutA(dst, (int)g_browse.left + 140, y, sm->l2, (int)strlen(sm->l2));
         char bars[16];
         snprintf(bars, sizeof(bars), "%d", sm->bars);
         SetTextColor(dst, RGB(120, 140, 200));
-        TextOutA(dst, BROWSE_X0 + 250, y, bars, (int)strlen(bars));
+        TextOutA(dst, (int)g_browse.left + 250, y, bars, (int)strlen(bars));
         const char *file = strrchr(sm->path, '\\');
-        if (file) TextOutA(dst, BROWSE_X0 + 276, y, file + 1, (int)strlen(file + 1));
+        if (file) TextOutA(dst, (int)g_browse.left + 276, y, file + 1, (int)strlen(file + 1));
     }
 
     /* The scroll thumb, sized and placed like the list it stands for. */
     if (gc > rows) {
-        int track = BROWSE_Y1 - BROWSE_Y0 - 8;
+        int track = (int)g_browse.bottom - (int)g_browse.top - 8;
         int th = track * rows / gc;
         if (th < 8) th = 8;
-        int ty = BROWSE_Y0 + 4 + (track - th) * g_scroll / (gc - rows);
-        RECT thumb = { SCROLL_X, ty, SCROLL_X + 9, ty + th };
+        int ty = (int)g_browse.top + 4 + (track - th) * g_scroll / (gc - rows);
+        RECT thumb = { g_scroll_x, ty, g_scroll_x + 9, ty + th };
         HBRUSH hb = CreateSolidBrush(RGB(120, 150, 230));
         FillRect(dst, &thumb, hb);
         DeleteObject(hb);
     }
 
-    /* Mark the live category, since the chrome's own buttons cannot light up
-     * until the states in EJAY02 are cut out. */
-    if (g_group < 12) {
-        int bx = (g_group < 6) ? BTN_LX : BTN_RX;
-        int by = BTN_Y0 + (g_group % 6) * BTN_PITCH;
-        HBRUSH hb = CreateSolidBrush(RGB(255, 210, 90));
-        RECT tick = { bx - 5, by + 5, bx - 1, by + BTN_H - 5 };
-        FillRect(dst, &tick, hb);
-        DeleteObject(hb);
-    }
-
+    SelectClipRgn(dst, NULL);
+    DeleteObject(clip);
     SelectObject(dst, old);
     DeleteObject(fnt);
+
+    /* Light the live category from the sheet. SEITEN calls these
+     * OnOffRollOverButtons, so their third state is the "on" one - which is
+     * exactly what a selected category is. */
+    for (int i = 0; i < 12; i++) {
+        char nm[16];
+        snprintf(nm, sizeof(nm), "B_GRUPPE_%02d", i + 1);
+        const KCTRL *c = find_ctrl(nm);
+        /* Two states only - the third pair is 0,0 - so "on" is the second,
+         * which is also the roll-over. eJay reuses it for both. */
+        if (c) draw_ctrl(dst, c, i == g_group ? 1 : 0);
+    }
 }
 
-static int browser_input(UINT m, WPARAM w, LPARAM l)
+/* ---- dragging a block along its lane -------------------------------------
+ * The engine has no "move": APlay appends to a track and that is that. So a
+ * drop rebuilds the arrangement - ACloseAll, place every slot again, AStart -
+ * which is heavier than it sounds only if you are moving blocks constantly,
+ * and is exactly what eJay itself has to do.
+ *
+ * ponytail: rebuild the whole arrangement on drop. Fine for sixty-four slots;
+ * revisit if the engine turns out to have a per-entry edit. */
+static int g_hover = -1, g_down = -1;
+
+static void paint_ctrl(HWND wnd, int i, int state)
 {
+    if (i < 0 || i >= g_ctrl_n) return;
+    HDC dc = GetDC(wnd);
+    draw_ctrl(g_canvas, &g_ctrl[i], state);
+    BitBlt(dc, g_ctrl[i].x, g_ctrl[i].y, g_ctrl[i].w, g_ctrl[i].h,
+           g_canvas, g_ctrl[i].x, g_ctrl[i].y, SRCCOPY);
+    ReleaseDC(wnd, dc);
+}
+
+static int g_drag = -1;      /* index into g_song, or -1 */
+static int g_drag_dx;        /* grab offset within the block, in bars */
+
+static int bar_width(void) { return (GRID_X1 - GRID_X0) / 16; }
+
+static int slot_at(int x, int y)
+{
+    if (x < GRID_X0 || x >= GRID_X1 || y < GRID_Y0 || y >= GRID_Y1) return -1;
+    int lane = (y - GRID_Y0) / 18;
+    int bar  = (x - GRID_X0) / bar_width();
+    for (int i = 0; i < g_song_n; i++)
+        if (g_song[i].lane == lane && bar >= g_song[i].bar &&
+            bar < g_song[i].bar + g_song[i].bars) return i;
+    return -1;
+}
+
+static void rebuild_arrangement(void)
+{
+    static short st[64];
+    fn_i_v ACloseAll = (fn_i_v) GetProcAddress(g_eng, "ACloseAll");
+    fn_i_v AStop     = (fn_i_v) GetProcAddress(g_eng, "AStop");
+    fn_i_i AStart    = (fn_i_i) GetProcAddress(g_eng, "AStart");
+    if (AStop)     AStop();
+    if (ACloseAll) ACloseAll();
+    for (int i = 0; i < g_song_n && g_aplay; i++) {
+        const SLOT *sl = &g_song[i];
+        if (sl->lib < 0 || sl->lib >= g_lib_n) continue;
+        st[i] = 0x63;
+        g_aplay(0, 0, 0, 0, 0, &st[i], g_lib[sl->lib].path,
+                sl->lane, sl->bar * 88200, 0, 0, 0x100);
+    }
+    if (AStart) AStart(0xA17FC0);
+}
+
+static int browser_input(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    /* A block follows the pointer along its own lane, snapped to the bar grid,
+     * and the arrangement goes back to the engine when it is dropped. */
+    if (m == WM_MOUSEMOVE && g_drag >= 0) {
+        SLOT *sl = &g_song[g_drag];
+        int bar = ((short)LOWORD(l) - GRID_X0) / bar_width() - g_drag_dx;
+        if (bar < 0) bar = 0;
+        if (bar + sl->bars > 16) bar = 16 - sl->bars;
+        if (bar != sl->bar) {
+            sl->bar = bar;
+            draw_blocks(g_canvas);
+            HDC dc = GetDC(h);
+            BitBlt(dc, GRID_X0, GRID_Y0, GRID_X1 - GRID_X0, GRID_Y1 - GRID_Y0,
+                   g_canvas, GRID_X0, GRID_Y0, SRCCOPY);
+            ReleaseDC(h, dc);
+        }
+        return 1;
+    }
+    if (m == WM_LBUTTONUP && g_drag >= 0) {
+        const SLOT *sl = &g_song[g_drag];
+        printf("  moved %s -> lane %d, bar %d\n",
+               (sl->lib >= 0 && sl->lib < g_lib_n) ? g_lib[sl->lib].l1 : "?",
+               sl->lane, sl->bar);
+        rebuild_arrangement();
+        g_drag = -1;
+        ReleaseCapture();
+        return 1;
+    }
+    if (m == WM_LBUTTONDOWN) {
+        int hit = slot_at((short)LOWORD(l), (short)HIWORD(l));
+        if (hit >= 0) {
+            g_drag = hit;
+            g_drag_dx = ((short)LOWORD(l) - GRID_X0) / bar_width() - g_song[hit].bar;
+            SetCapture(h);
+            return 1;
+        }
+    }
+
+    /* Roll-over and press come straight off the sheet: only two controls are
+     * ever lit at once, so this is two blits rather than a repaint. */
+    if (m == WM_MOUSEMOVE || m == WM_LBUTTONUP) {
+        int now = ctrl_at((short)LOWORD(l), (short)HIWORD(l));
+        if (m == WM_LBUTTONUP && g_down >= 0) { paint_ctrl(h, g_down, 0); g_down = -1; }
+        if (now != g_hover) {
+            paint_ctrl(h, g_hover, 0);
+            paint_ctrl(h, now, 1);
+            g_hover = now;
+        }
+        if (m == WM_MOUSEMOVE) return 1;
+    }
+    if (m == WM_LBUTTONDOWN || m == WM_LBUTTONDBLCLK) {
+        int hit = ctrl_at((short)LOWORD(l), (short)HIWORD(l));
+        if (hit >= 0) { g_down = hit; paint_ctrl(h, hit, 2); }
+    }
+
     /* The browser is the one part of this chrome that does something, so it
      * gets the input: a category button switches the sound group, the wheel or
      * a click in the scroll strip moves the list, a click on a row selects it,
@@ -556,16 +807,16 @@ static int browser_input(UINT m, WPARAM w, LPARAM l)
             if (grp < g_grp_n) { g_group = grp; g_scroll = 0; g_dirty = 1; }
             return 1;
         }
-        if (x >= SCROLL_X && x < SCROLL_X + 9 &&
-            y >= BROWSE_Y0 && y < BROWSE_Y1) {
+        if (x >= g_scroll_x && x < g_scroll_x + 9 &&
+            y >= (int)g_browse.top && y < (int)g_browse.bottom) {
             int gc = g_grp_count[g_group], rows = browser_rows();
             if (gc > rows)
-                g_scroll = (y - BROWSE_Y0) * (gc - rows) / (BROWSE_Y1 - BROWSE_Y0);
+                g_scroll = (y - (int)g_browse.top) * (gc - rows) / ((int)g_browse.bottom - (int)g_browse.top);
             g_dirty = 1;
             return 1;
         }
-        if (x >= BROWSE_X0 && x < BROWSE_X1 && y >= BROWSE_Y0 && y < BROWSE_Y1) {
-            int r = (y - BROWSE_Y0 - 4) / ROW_H;
+        if (x >= (int)g_browse.left && x < (int)g_browse.right && y >= (int)g_browse.top && y < (int)g_browse.bottom) {
+            int r = (y - (int)g_browse.top - 4) / ROW_H;
             int idx = g_grp_start[g_group] + g_scroll + r;
             if (r >= 0 && r < browser_rows() &&
                 g_scroll + r < g_grp_count[g_group] && idx < g_lib_n) {
@@ -591,7 +842,7 @@ static int browser_selftest(void)
         int got = hit_group(bx + BTN_W / 2, by + BTN_H / 2);
         if (got != i) { printf("  ! button %d hit-tests as %d\n", i, got); bad++; }
     }
-    if (hit_group(BROWSE_X0 + 40, BROWSE_Y0 + 40) != -1) {
+    if (hit_group((int)g_browse.left + 40, (int)g_browse.top + 40) != -1) {
         printf("  ! a click in the list hit-tests as a button\n"); bad++;
     }
     if (g_lib_n) {
@@ -817,6 +1068,7 @@ int main(int argc, char **argv)
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
     int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
     int seq = 0, trace_files = 0, song = 0, selftest = 0;
+    int probe_ms = -1, probe_key = 0, dragtest = 0;
     const char *libdir = NULL;
     /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
     int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
@@ -842,6 +1094,9 @@ int main(int argc, char **argv)
                                                 main_screen = 1; intro = 0; }
         else if (!strcmp(argv[i], "--trace-files")) trace_files = 1;
         else if (!strcmp(argv[i], "--selftest")) selftest = 1;
+        else if (!strcmp(argv[i], "--refresh") && i + 1 < argc) probe_ms = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--probekey")) probe_key = 1;
+        else if (!strcmp(argv[i], "--dragtest")) dragtest = 1;
         else if (!strcmp(argv[i], "--group") && i + 1 < argc) g_group = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-intro")) intro = 0;
         else if (!strcmp(argv[i], "--main")) { main_screen = 1; intro = 0; }
@@ -949,6 +1204,49 @@ int main(int argc, char **argv)
         if (InitText && load_bitmap(ALoad, &text, path))
             printf("  GFX_IntroInitText          -> %d\n",
                    InitText(text.hdc, text.w, text.h, text.bits));
+
+        /* Register the intro's own elements. SEITEN lists 58 of them under
+         * `:Intro` - the LED field, three progress bars and their percentages,
+         * three lines of text and twenty-four VU segments - and K_640 gives
+         * each a name and ten numbers. GFX_IntroSetKey takes exactly that: a
+         * name and ten values. Without them the DLL reaches the point where it
+         * would draw those VU segments with nothing to draw them from, which is
+         * where the animation was stopping. */
+        fn_setkey SetKey = (fn_setkey) GetProcAddress(g_gfx, "GFX_IntroSetKey");
+        int keys = 0;
+        if (SetKey && load_keys("K_640")) {
+            for (int i = 0; i < g_ctrl_n; i++) {
+                const KCTRL *c = &g_ctrl[i];
+                if (strncmp(c->name, "K_INTRO", 7)) continue;
+                const int *n = c->raw;
+                SetKey(c->name, n[0] / KSCALE, n[1] / KSCALE, n[2] / KSCALE,
+                       n[3] / KSCALE, n[4] / KSCALE, n[5] / KSCALE,
+                       n[6] / KSCALE, n[7] / KSCALE, n[8] / KSCALE,
+                       n[9] / KSCALE);
+                keys++;
+            }
+        }
+        printf("  GFX_IntroSetKey x%d\n", keys);
+        /* Distinctive values into one element, then read the rect back: the
+         * only way to learn which of the ten arguments become which corner. */
+        if (SetKey && probe_key) {
+            SetKey("K_INTRO_VU01", 11, 22, 33, 44, 55, 66, 77, 88, 99, 110);
+            const int *r = (const int *)((const char *)g_gfx + 0x2EAC8 + 0x7990 + 0x34);
+            printf("  probe: VU01 rect %d,%d .. %d,%d\n", r[0], r[1], r[2], r[3]);
+        }
+        /* Read the rects back out of the DLL. The intro object is a static at
+         * base+0x2EAC8; its twenty-four VU elements live at +0x7990, 0x60
+         * apart, each holding left/top/right/bottom at +0x34..+0x40. An element
+         * the DLL never got coordinates for keeps whatever was in that memory,
+         * and the fill routine then runs over it - which is the stall. */
+        if (probe_key) {
+            const char *gb = (const char *)g_gfx;
+            for (int i = 0; i < 4; i++) {
+                const int *r = (const int *)(gb + 0x2EAC8 + 0x7990 + i * 0x60 + 0x34);
+                printf("    VU%02d rect %d,%d .. %d,%d\n", i + 1,
+                       r[0], r[1], r[2], r[3]);
+            }
+        }
     }
 
     /* ---- the workspace -------------------------------------------------
@@ -969,6 +1267,7 @@ int main(int argc, char **argv)
         }
         snprintf(path, sizeof(path), "%s\\EJAY02A", gfxdir);
         load_bitmap(ALoad, &g_sheet, path);
+        printf("  K_640 controls             -> %d\n", load_keys("K_640"));
     }
 
     /* ---- the arrangement -----------------------------------------------
@@ -1154,6 +1453,16 @@ int main(int argc, char **argv)
     }
 
     if (selftest && browser_selftest()) return 2;
+    /* One Refresh at a chosen timestamp, timed. The animation has eight
+     * thresholds in it and only one of the bands is slow, so the way to find
+     * which is to ask rather than to read. */
+    if (probe_ms >= 0 && Refresh) {
+        DWORD t = GetTickCount();
+        int rc = Refresh(probe_ms);
+        printf("  Refresh(%d) -> %d in %lu ms\n", probe_ms, rc,
+               (unsigned long)(GetTickCount() - t));
+        return 0;
+    }
     float peak = 0.0f;
     static float env[600];
     int env_n = 0;
@@ -1170,6 +1479,21 @@ int main(int argc, char **argv)
      * to actually click anything. */
     for (int i = 0; ticks == 0 || i < ticks; i++) {
         if (ticks == 0 && !IsWindow(wnd)) break;
+        /* Synthesise the drag gesture so it can be checked without a mouse:
+         * grab the first block, walk it six bars along its lane, drop it. */
+        if (dragtest && i == 20 && g_song_n) {
+            int bw = bar_width();
+            int y = GRID_Y0 + g_song[0].lane * 18 + 8;
+            int x0 = GRID_X0 + g_song[0].bar * bw + 4;
+            printf("  dragtest: block 0 at bar %d\n", g_song[0].bar);
+            browser_input(wnd, WM_LBUTTONDOWN, 0, MAKELPARAM(x0, y));
+            for (int b = 1; b <= 6; b++)
+                browser_input(wnd, WM_MOUSEMOVE, 0,
+                              MAKELPARAM(x0 + b * bw, y));
+            browser_input(wnd, WM_LBUTTONUP, 0, MAKELPARAM(x0 + 6 * bw, y));
+            printf("  dragtest: now at bar %d (expected %d)\n",
+                   g_song[0].bar, 6);
+        }
         if (seq && RTimer) RTimer();
         if (seq) mute_unless_mixing(*(short *)((char *)g_eng + 0x3AC68));
         if (ATimer) ATimer();
@@ -1248,9 +1572,9 @@ int main(int argc, char **argv)
         if (g_dirty) {
             HDC dc = GetDC(wnd);
             draw_browser(g_canvas);
-            BitBlt(dc, BROWSE_X0 - 60, BROWSE_Y0 - 24,
-                   640 - (BROWSE_X0 - 60), BROWSE_Y1 - BROWSE_Y0 + 24,
-                   g_canvas, BROWSE_X0 - 60, BROWSE_Y0 - 24, SRCCOPY);
+            BitBlt(dc, (int)g_browse.left - 60, (int)g_browse.top - 24,
+                   640 - ((int)g_browse.left - 60), (int)g_browse.bottom - (int)g_browse.top + 24,
+                   g_canvas, (int)g_browse.left - 60, (int)g_browse.top - 24, SRCCOPY);
             ReleaseDC(wnd, dc);
             g_dirty = 0;
         }

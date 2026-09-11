@@ -112,7 +112,18 @@ ASetPfad(dir) → AStop → AMitte(0,0) → RWaveParam(60, 0x6666) → ASetFader
   the sample - into the first lane with room at the bar the cursor is on, live,
   through `APlay`, and drawn into the grid in the same pass. Which is the
   gesture eJay's own tooltip describes: *"double click for play back of a
-  sample, move a sample to one of the tracks"*.
+  sample, move a sample to one of the tracks"*. A block already in the grid
+  drags along its lane, snapped to the bar; dropping it rebuilds the arrangement
+  in the engine, because `APlay` appends and there is no move.
+
+- **The chrome responds.** `K_640` is eJay's control table - a name and ten
+  numbers per control: where it sits, how big it is, and three source rectangles
+  in `EJAY02` for its normal, rolled-over and pressed states. **Every number is
+  in a 1280x960 space, so the 640x480 art set halves them** - which is why
+  `B_EJAY` is listed at x 1216 with a width of 63 and still fits on a 640-pixel
+  screen. Halve both and it is a 31-pixel button at x 608, hard against the
+  right rail. 591 controls, and the buttons now light under the pointer and go
+  down when clicked, out of eJay's own sheet.
 
 ```
 host32/build.bat host32/ejay2.c host32/ejay2.exe
@@ -141,17 +152,24 @@ The start-up **system check** renders too, through the `GFX_Intro*` family:
 ![Dance eJay 2's system check](docs/img/ejay2-systemcheck.png)
 
 *The loading screen, drawn by the same DLL: three progress bars, the LED matrix,
-the VU strip, both logos. It stalls about 3.4 seconds in, where the DLL starts
-drawing its 24 VU elements - those want coordinates registered first through
-`GFX_IntroSetKey`, whose eleven arguments are exactly a control name plus the
-ten numbers `K_640` gives it.*
+the VU strip, both logos.*
 
-Still to do: the pressed and hover states for the buttons, which are cut from
-`EJAY02` and need the `K_640` coordinate table read properly; dragging a block
-along its lane rather than only dropping it; and the `GFX_IntroSetKey` layout
-pass that unsticks the loading screen. The status word `APlay` is handed still
-never moves off 99 even though the sample plays, so something is expected to
-read it that nothing here does yet.
+It stalls, and the stall is now located exactly: `GFX_IntroRefresh(3000)`
+returns in 0 ms, `GFX_IntroRefresh(3500)` takes **94 seconds**. That band runs a
+fill routine once per VU segment, twenty-four times, and each fill takes its
+count from `rand() & 0x7FFF` - up to 32,767 - which it is meant to clamp against
+the segment's own rectangle. Those rectangles are zero, so nothing clamps.
+`GFX_IntroSetKey` is what should fill them in, and it does take exactly a control
+name plus the ten numbers `K_640` holds; feeding it all 58 registers them
+without complaint and the rectangles stay zero, so either the argument order is
+wrong or something has to create the elements first. [EJAY2](docs/EJAY2.md) has
+the detail.
+
+Still to do: the transport buttons do not do anything yet beyond lighting up;
+the status word `APlay` is handed never moves off 99 even though the sample
+plays, so something is expected to read it that nothing here does; and the
+loading screen still stalls, though it is now pinned down rather than mysterious
+- see below.
 
 **The 1997 engine initialises and runs.** `DANCE02.DLL` is lifted whole -
 30,904 bytes of 16-bit machine code into 1,244 C functions - `LibMain`
