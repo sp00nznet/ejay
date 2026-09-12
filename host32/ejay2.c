@@ -230,6 +230,41 @@ static int patch_import(HMODULE mod, const char *dll, const char *fn,
     return 0;
 }
 
+/* ---- watching the graphics DLL's own state --------------------------------
+ * The only reliable way to learn what one of these calls does is to photograph
+ * its data before and after. Everything known about GFX_IntroSetKey came out
+ * of doing it once; this makes it a routine. */
+static int  *g_snap;
+static DWORD g_snap_n;
+
+static void snap_take(HMODULE mod)
+{
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)mod;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((char *)mod + dos->e_lfanew);
+    g_snap_n = nt->OptionalHeader.SizeOfImage;
+    if (!g_snap) g_snap = (int *)malloc(g_snap_n);
+    if (g_snap) memcpy(g_snap, mod, g_snap_n);
+}
+
+/* Report changed dwords, optionally only inside one window of the image. */
+static void snap_diff(HMODULE mod, const char *what, DWORD lo, DWORD hi, int max)
+{
+    if (!g_snap) return;
+    const char *b = (const char *)mod;
+    int shown = 0;
+    for (DWORD off = lo & ~3u; off + 4 <= hi && off + 4 <= g_snap_n; off += 4) {
+        int a0 = g_snap[off / 4], a1 = *(const int *)(b + off);
+        if (a0 == a1) continue;
+        if (!shown) printf("  [%s] changed:\n", what);
+        if (shown < max)
+            printf("    +%06lX  %11d -> %-11d\n", (unsigned long)off, a0, a1);
+        shown++;
+    }
+    if (!shown) printf("  [%s] changed nothing in that range\n", what);
+    else if (shown > max) printf("    ... and %d more\n", shown - max);
+    snap_take(mod);
+}
+
 /* Peek at the engine's own globals. Their addresses come out of the
  * disassembly, and watching them beats guessing which call quietly did
  * nothing: 0x4342C is the handshake AStart spins on, 0x43394 / 0x4339C /
@@ -1143,14 +1178,57 @@ static LONG WINAPI report_fault(EXCEPTION_POINTERS *ep)
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+/* An unhandled-exception filter never runs if the DLL has a __try that
+ * swallows the fault first, and PXD32CL1 has several. A vectored handler sees
+ * every exception first-chance, before any of that. */
+static LONG CALLBACK first_chance(EXCEPTION_POINTERS *ep)
+{
+    static int shown;
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    /* Every code, not just access violations: a stack overflow leaves no stack
+     * to print from later, so it has to be caught here or not at all. C++
+     * exceptions and the thread-naming marker are noise. */
+    if (code != 0xE06D7363 && code != 0x406D1388 && shown < 8) {
+        void *pc = (void *)ep->ExceptionRecord->ExceptionAddress;
+        HMODULE mod = NULL;
+        char name[MAX_PATH] = "?";
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)pc, &mod);
+        if (mod) GetModuleFileNameA(mod, name, sizeof(name));
+        const char *tail = strrchr(name, '\\');
+        printf("  !! exception %d: code %08lX  %s + %08lX\n", ++shown,
+               (unsigned long)code, tail ? tail + 1 : name,
+               mod ? (unsigned long)((char *)pc - (char *)mod) : 0ul);
+        if (code == EXCEPTION_ACCESS_VIOLATION)
+            printf("     %s address %p\n",
+                   ep->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading",
+                   (void *)ep->ExceptionRecord->ExceptionInformation[1]);
+        fflush(stdout);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+/* Run one Refresh on a thread of our choosing, so the stack size is ours. */
+static fn_i_i g_probe_refresh;
+static int    g_probe_ms, g_probe_rc;
+
+static DWORD WINAPI probe_thread(LPVOID unused)
+{
+    (void)unused;
+    g_probe_rc = g_probe_refresh(g_probe_ms);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    AddVectoredExceptionHandler(1, first_chance);
     SetUnhandledExceptionFilter(report_fault);
     setvbuf(stdout, NULL, _IONBF, 0);   /* a crash must not eat the trail */
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
     int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
     int seq = 0, trace_files = 0, song = 0, selftest = 0;
-    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, no_init = 0, flat = 0, limit = 0;
+    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, ending = 0, flat = 0, limit = 0, watch = 0, bigstack = 0;
     const char *libdir = NULL;
     /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
     int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
@@ -1179,10 +1257,12 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--refresh") && i + 1 < argc) probe_ms = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--probekey") && i + 1 < argc) probe_key = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dragtest")) dragtest = 1;
+        else if (!strcmp(argv[i], "--watch")) watch = 1;
+        else if (!strcmp(argv[i], "--bigstack")) bigstack = 1;
         else if (!strcmp(argv[i], "--flat") && i + 1 < argc) flat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--limit") && i + 1 < argc) limit = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--init1")) first_minus1 = 1;
-        else if (!strcmp(argv[i], "--no-introinit")) no_init = 1;
+        else if (!strcmp(argv[i], "--ending")) ending = 1;
         else if (!strcmp(argv[i], "--group") && i + 1 < argc) g_group = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-intro")) intro = 0;
         else if (!strcmp(argv[i], "--main")) { main_screen = 1; intro = 0; }
@@ -1265,6 +1345,7 @@ int main(int argc, char **argv)
     fn_i_i Refresh    = g_gfx ? (fn_i_i) GetProcAddress(g_gfx, "GFX_IntroRefresh") : NULL;
 
     if (intro && g_gfx) {
+        snap_take(g_gfx);
         patch_import(g_gfx, "GDI32.dll", "BitBlt",
                      (void *)count_bitblt, (void **)&g_real_bitblt);
         patch_import(g_gfx, "GDI32.dll", "PatBlt",
@@ -1304,19 +1385,59 @@ int main(int argc, char **argv)
             }
         }
         printf("  GFX_IntroSetKey x%d\n", keys);
+        if (watch) snap_diff(g_gfx, "SetKey x58", 0x2EAC8 + 0x0,
+                             0x2EAC8 + 0x8500, 200);
 
         /* Off by default: it grabs the whole desktop and does not come back
          * promptly on a modern display. */
         if (scrcap && Capture) printf("  GFX_IntroDoScrCapture      -> %d\n", Capture());
+        if (watch) snap_diff(g_gfx, "DoScrCapture", 0x2EAC8, 0x2EAC8 + 0x8500, 200);
 
         snprintf(path, sizeof(path), "%s\\EJAY31A", gfxdir);
         if (load_bitmap(ALoad, &scr, path)) {
             printf("  GFX_IntroInitScreen        -> %d\n",
                    InitScreen(scr.hdc, scr.w, scr.h, scr.bits, scr.pal));
-            /* Dancejay hands the same DC back as the copy source with a null
-             * pixel pointer when the display is deeper than 8bpp. */
-            if (InitCopy) printf("  GFX_IntroInitScreenCopy    -> %d\n",
-                                 InitCopy(scr.hdc, scr.w, scr.h, NULL));
+            if (watch) snap_diff(g_gfx, "InitScreen", 0x2EAC8, 0x2EAC8 + 0x8500, 200);
+            /* The copy surface has to be real. GFX_IntroInitScreenCopy sets a
+             * rect from w,h and then tests the pixel pointer - and bails if it
+             * is null, before it stores the device context at +0x79C that the
+             * animation later blits from. Passing null there is a crash waiting
+             * at t > 3400ms: reading [NULL+4] for a BitBlt source.
+             *
+             * So load the screen bitmap a second time and hand that over. A
+             * scratch copy of the screen is what the name says it wants, and an
+             * independent DIB gives the fade something to fade from. */
+            if (InitCopy) {
+                /* And it has to be 16-bit. The blend loop inside the DLL ends
+                 * `mov word ptr [edi], ax`, packing 5-6-5 out of a 24-bit
+                 * colour, so it writes two bytes a pixel. Handing it one of the
+                 * 8bpp GRAFIKA bitmaps gives it half the buffer it believes it
+                 * has; it runs off the end, catches that in its own __try and
+                 * carries on - drawing correctly while corrupting whatever
+                 * follows the DIB. A scratch 5-6-5 surface of the right size is
+                 * what it actually wants. */
+                HDC wdc = GetDC(wnd);
+                struct { BITMAPINFOHEADER h; DWORD mask[3]; } bi;
+                memset(&bi, 0, sizeof(bi));
+                bi.h.biSize = sizeof(BITMAPINFOHEADER);
+                bi.h.biWidth = scr.w;
+                bi.h.biHeight = scr.h;
+                bi.h.biPlanes = 1;
+                bi.h.biBitCount = 16;
+                bi.h.biCompression = BI_BITFIELDS;
+                bi.mask[0] = 0xF800; bi.mask[1] = 0x07E0; bi.mask[2] = 0x001F;
+                void *cbits = NULL;
+                HBITMAP cbm = CreateDIBSection(wdc, (BITMAPINFO *)&bi,
+                                               DIB_RGB_COLORS, &cbits, NULL, 0);
+                HDC cdc = CreateCompatibleDC(wdc);
+                if (cbm && cdc) SelectObject(cdc, cbm);
+                ReleaseDC(wnd, wdc);
+                printf("  copy surface               -> %dx%d 16bpp, bits %p\n",
+                       scr.w, scr.h, cbits);
+                printf("  GFX_IntroInitScreenCopy    -> %d\n",
+                       InitCopy((int)(INT_PTR)cdc, scr.w, scr.h, cbits));
+            }
+            if (watch) snap_diff(g_gfx, "InitScreenCopy", 0x2EAC8, 0x2EAC8 + 0x8500, 200);
         } else {
             printf("  ! no bitmap - run this from the ejay folder\n");
         }
@@ -1325,21 +1446,23 @@ int main(int argc, char **argv)
         if (InitLeds && load_bitmap(ALoad, &leds, path))
             printf("  GFX_IntroInitLeds          -> %d\n",
                    InitLeds(leds.hdc, leds.w, leds.h, leds.bits));
+            if (watch) snap_diff(g_gfx, "InitLeds", 0x2EAC8, 0x2EAC8 + 0x8500, 200);
 
         snprintf(path, sizeof(path), "%s\\EJAY32A", gfxdir);
         if (InitText && load_bitmap(ALoad, &text, path))
             printf("  GFX_IntroInitText          -> %d\n",
                    InitText(text.hdc, text.w, text.h, text.bits));
+            if (watch) snap_diff(g_gfx, "InitText", 0x2EAC8, 0x2EAC8 + 0x8500, 200);
 
-        /* -1 is the first-time init, and it is not optional. With the object's
-         * "started" byte at +0x368 still clear, -1 is the only argument that
-         * reaches the branch which sets it; every other value walks straight
-         * into the animation with its elements never prepared, and the fill
-         * routine then runs a software pixel loop off a zero rectangle. That is
-         * the 92-second stall - not a hang, and not drawing either: 24 BitBlts
-         * in 83 seconds. Just one call that should not have been the first. */
-        if (Refresh && !no_init)
-            printf("  GFX_IntroRefresh(-1) init  -> %d\n", Refresh(-1));
+        /* -1 is not an init, whatever it looked like. Its dispatch compares
+         * the argument before it looks at the "started" byte, and the branch it
+         * reaches sets that byte and switches every later call to a different
+         * renderer - the ending, which is why Dancejay calls it in the loop
+         * before GFX_IntroClose and nowhere else. Driving it first makes the
+         * animation never run at all, which is what "no stall, black screen"
+         * was. Off unless asked for. */
+        if (Refresh && ending)
+            printf("  GFX_IntroRefresh(-1)       -> %d\n", Refresh(-1));
 
         /* Distinctive values into one element, then read the rect back: the
          * only way to learn which of the ten arguments become which corner. */
@@ -1602,6 +1725,24 @@ int main(int argc, char **argv)
     /* One Refresh at a chosen timestamp, timed. The animation has eight
      * thresholds in it and only one of the bands is slow, so the way to find
      * which is to ask rather than to read. */
+    /* Neither handler fires and the process still dies, which is what a stack
+     * overflow looks like - the handler would have to run on the stack that has
+     * just been exhausted. So try the call on a thread with a big one. If that
+     * is the difference, the DLL simply wants more stack than a default thread
+     * has, and saying so is the fix. */
+    if (probe_ms >= 0 && Refresh && bigstack) {
+        g_probe_refresh = Refresh;
+        g_probe_ms = probe_ms;
+        DWORD t = GetTickCount();
+        HANDLE th = CreateThread(NULL, 64u << 20, probe_thread, NULL, 0, NULL);
+        DWORD w = th ? WaitForSingleObject(th, 120000) : WAIT_FAILED;
+        printf("  Refresh(%d) on a 64MB stack -> %d in %lu ms (wait %lu)\n",
+               probe_ms, g_probe_rc, (unsigned long)(GetTickCount() - t),
+               (unsigned long)w);
+        if (th) CloseHandle(th);
+        return 0;
+    }
+
     if (probe_ms >= 0 && Refresh) {
         patch_import(g_gfx, "GDI32.dll", "BitBlt",
                      (void *)count_bitblt, (void **)&g_real_bitblt);

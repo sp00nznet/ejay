@@ -297,80 +297,60 @@ The browser's own geometry comes from the same table rather than from a ruler:
 the strip beside it. Measuring it by eye put the list 14 pixels too high, over
 the transport bar.
 
-## The intro stall: one call that should not have been the first
+## The intro: two things it wanted, neither of them a value
 
-`GFX_IntroRefresh(3000)` returns in 0 ms. `GFX_IntroRefresh(3500)` took
-**92 seconds**. So it was never a hang, and it was one call in one band - the
-one past 0xd48.
+It runs now - the progress bars fill, the twenty-four VU segments move, the LED
+matrix blinks, and the text reads "Checking Soundsystem ... Completed". It took
+two fixes and one retraction.
 
-It was not drawing either, which is the part that redirected the search:
-counting the graphics DLL's own GDI calls across that one Refresh gives **24
-BitBlts and 1 PatBlt in 83 seconds**. Twenty-five GDI calls cannot take a minute
-and a half. What eats the time is a software pixel loop inside the DLL -
-`movsd`, byte shifts, `ror` - blending two pixels an iteration, and its
-iteration count comes out of the element's own fields.
+### The keys have to be registered before the bitmaps
 
-Those fields were zero: the twenty-four VU elements at `intro+0x7990` (0x60
-apart) had a zero rectangle at +0x34 and a zero float scale at +0x44. Nothing
-clamped the loop.
+`K_640` holds 58 `K_INTRO_*` entries and `GFX_IntroSetKey` files each one's rect
+by name. Do that **before** `GFX_IntroInitScreen` and the rest, and the
+animation's elements have geometry when it reaches them. Do it after, or not at
+all, and the fill routine walks a zero rectangle: that was the 92-second band
+past 0xd48, where 24 BitBlts took 83 seconds because the time went into a
+software pixel loop with nothing bounding it.
 
-**The fix is `GFX_IntroRefresh(-1)` as the first call.** Reading the dispatch at
-the top of the function:
+### The copy surface has to be real, and 16-bit
+
+`GFX_IntroInitScreenCopy(hdc, w, h, bits)` sets a rect from `w,h` and then tests
+`bits` - and **bails if it is null**, before it stores the device context at
+`+0x79C` that the animation later blits from. Passing null there is a crash
+waiting at t > 3400ms: `mov edx, [eax+4]` on a null `eax`, feeding a BitBlt.
+
+Giving it one of the `GRAFIKA` bitmaps instead is not enough either. The blend
+loop inside the DLL ends
 
 ```
-mov  edi, [ebp+8]
-cmp  edi, -1
-je   first_time            ; -1 goes here
-mov  al, [esi+0x368]       ; "started" byte
-test al, al
-je   animate               ; not -1 and never started -> straight into the body
-...
-first_time:
-  [esi+0x368] = 1; [esi+0x8418] = 1; [esi+0x8419] = 0; [esi+0x80] = 0
-  return 1
+mov word ptr [edi], ax        ; ax packed 5-6-5 out of a 24-bit colour
 ```
 
-With the started byte clear, **-1 is the only argument that reaches the branch
-which sets it.** Any other value walks straight into the animation with the
-elements never prepared. Call it once first and the whole 29-second timeline
-runs without a stall - every Refresh returns 1, start to finish.
+so it writes two bytes a pixel, and the art set is 8bpp. It gets half the buffer
+it believes it has, runs off the end, catches that in its own `__try` and carries
+on - drawing correctly while corrupting whatever follows the DIB. A first-chance
+exception handler shows it plainly: the same address faulting over and over
+while the picture looks fine. What it wants is a scratch 5-6-5 DIB section of
+the screen's size, which is what the host makes for it now.
 
-What it does not yet do is show anything: after the proper init the per-frame
-path is a different routine, it draws (13 BitBlts and 447 PatBlts over 400
-frames, so it is working), and the result stays black. The intro expects to be
-fed its progress and level values by the application, and nothing here feeds
-them. `--no-introinit` skips the init and gets the old behaviour - the system
-check screen painted once, then the stall - which is where the screenshot above
-came from.
+### And -1 is not an init
 
-## What feeds the intro: nothing, and that is the point
+The retraction. `GFX_IntroRefresh(-1)` looked like a first-time init because its
+dispatch compares the argument against -1 *before* it looks at the object's
+"started" byte, and the branch it reaches sets that byte. But setting it
+switches every later call to a different renderer - the ending - which is why
+Dancejay calls -1 in the loop before `GFX_IntroClose` and nowhere else. Driving
+it first is what produced "no stall, black screen": the animation never ran at
+all. It is behind `--ending` now.
 
-There is no value setter in the graphics DLL. The whole intro surface is
-`GFX_IntroDoScrCapture`, `GFX_IntroInitScreen`, `GFX_IntroInitScreenCopy`,
-`GFX_IntroInitLeds`, `GFX_IntroInitText`, `GFX_IntroInitSplash`,
-`GFX_IntroShowSplash`, `GFX_IntroSetKey`, `GFX_IntroRefresh` and
-`GFX_IntroClose`. No `SetProgress`, no `SetLevel`, no per-element value at all -
-and `Dancejay.exe` has exactly one `GFX_IntroSetKey` call site, inside the loop
-that walks the coordinate table.
+The single-jump probe `--refresh 3500` is worth knowing about as an artefact:
+calling Refresh once with a timestamp 3.5 seconds ahead of nothing makes the
+animation try to cover the whole gap in one frame, which is stack-hungry enough
+to die without either exception handler getting to print. On a 64MB stack it
+survives and just takes a long time. Driven frame by frame, as the application
+drives it, none of that happens.
 
-So the elements animate themselves off the timestamp `GFX_IntroRefresh` is
-given. The progress bars fill because time passed, not because anybody told
-them a percentage. That is why fixing the first call fixed the timeline: it was
-never waiting to be fed, it was walking into an animation it had not been told
-to start.
-
-`GFX_AnimationPhase` is not it either - its eleven arguments come off a
-0x1CC-stride record array in the application, and its two call sites are in the
-workspace, not the intro.
-
-What is still wrong is separate: after the correct init the per-frame path draws
-(13 BitBlts and 447 PatBlts over 400 frames) and the result stays black. The
-next suspect is `GFX_IntroInitScreenCopy`. Dancejay calls it two ways - with the
-screen's own DC and a null pixel pointer when the display is deeper than 8bpp,
-and otherwise with a *second* bitmap loaded into its own record at `Me+0x5E8`.
-This host only ever does the first.
-
-## GFX_IntroSetKey stores a rect per name
+## GFX_IntroSetKey stores a rect per name## GFX_IntroSetKey stores a rect per name
 
 Eleven arguments: a name and ten numbers. The first four are **x, y, w, h** -
 the DLL stores `left = a1, top = a2, right = a1 + a3, bottom = a2 + a4`. In a

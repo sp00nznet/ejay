@@ -151,25 +151,36 @@ The start-up **system check** renders too, through the `GFX_Intro*` family:
 
 ![Dance eJay 2's system check](docs/img/ejay2-systemcheck.png)
 
-*The loading screen, drawn by the same DLL: three progress bars, the LED matrix,
-the VU strip, both logos.*
+*Dance eJay 2's loading screen, animating: three progress bars filling, the LED
+matrix blinking, twenty-four VU segments moving, and its own text - all drawn by
+`PXD32CL1.DLL` out of the bitmaps on the disc.*
 
-**The 92-second stall is fixed, and it was one missing call.**
-`GFX_IntroRefresh(3000)` returned in 0 ms and `GFX_IntroRefresh(3500)` took 92
-seconds - never a hang. It was not drawing either: 24 BitBlts and 1 PatBlt in 83
-seconds, so the time went into a software pixel loop inside the DLL whose
-iteration count comes from element fields that were all zero.
+**It runs.** The progress bars fill, the twenty-four VU segments move, the LED
+matrix blinks, and the text reads *"Checking Soundsystem ... Completed"*.
 
-`GFX_IntroRefresh(-1)` is the first-time init. With the object's "started" byte
-still clear, -1 is the only argument that reaches the branch which sets it;
-every other value walks straight into the animation with its elements never
-prepared. Call it once first and the whole 29-second timeline runs clean.
+Two things it wanted, and neither was a value to be fed:
 
-It does not show anything yet - after the init the per-frame path draws (13
-BitBlts, 447 PatBlts over 400 frames) but the result stays black, because the
-intro expects the application to feed it progress and level values and nothing
-here does. `--no-introinit` gets the old behaviour, which is where the
-screenshot above came from. [EJAY2](docs/EJAY2.md) has the rest.
+- **Register the keys before the bitmaps.** `K_640` holds 58 `K_INTRO_*`
+  entries and `GFX_IntroSetKey` files each one's rect by name. Do that before
+  `GFX_IntroInitScreen` and the elements have geometry when the animation
+  reaches them; do it after and the fill routine walks a zero rectangle, which
+  is what the 92-second band past 0xd48 was - 24 BitBlts in 83 seconds, because
+  the time went into a software pixel loop with nothing bounding it.
+- **The copy surface has to be real, and 16-bit.**
+  `GFX_IntroInitScreenCopy(hdc, w, h, bits)` bails if `bits` is null, before it
+  stores the device context the animation blits from - so null is a crash
+  waiting at t > 3400ms. And its blend loop ends `mov word ptr [edi], ax`,
+  packing 5-6-5, so an 8bpp bitmap from `GRAFIKA` gives it half the buffer it
+  thinks it has: it overruns, catches that in its own `__try`, and carries on
+  drawing correctly while corrupting what follows. It wants a scratch 5-6-5 DIB
+  the size of the screen.
+
+And a retraction: `GFX_IntroRefresh(-1)` is **not** a first-time init. Its
+dispatch checks the argument before the "started" byte, and the branch it
+reaches switches every later call to the *ending* renderer - which is why
+Dancejay calls it only in the loop before `GFX_IntroClose`. Driving it first is
+what produced "no stall, black screen": the animation never ran.
+[EJAY2](docs/EJAY2.md) has the rest.
 
 Still to do: the transport buttons do not do anything yet beyond lighting up;
 the status word `APlay` is handed never moves off 99 even though the sample
