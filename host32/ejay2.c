@@ -1951,6 +1951,9 @@ int main(int argc, char **argv)
     }
     float peak = 0.0f;
     static float env[2400];
+    static int   envt[2400];   /* AGetTime beside each level, so the time axis
+                                 is the engine's playback clock and not an
+                                 assumption about how long a tick took */
     int env_n = 0;
     double played = 0.0;   /* engine bytes from samples that already finished */
     DWORD t0 = GetTickCount();
@@ -2087,7 +2090,10 @@ int main(int argc, char **argv)
         pump_messages();
         float p = meter_peak();
         if (p > peak) peak = p;
-        if (env_n < (int)(sizeof(env) / sizeof(env[0]))) env[env_n++] = p;
+        if (env_n < (int)(sizeof(env) / sizeof(env[0]))) {
+            envt[env_n] = AGetTime ? AGetTime(0) : 0;
+            env[env_n++] = p;
+        }
         if (seq && i % 50 == 0)
             printf("    t=%5lums  AGetTime %8d  transport %9d  cur %d/%d  peak %.3f\n",
                    (unsigned long)(GetTickCount() - t0),
@@ -2143,13 +2149,17 @@ int main(int argc, char **argv)
         for (int k = 0; k + 8 <= env_n; k += 8) {
             float m = 0;
             for (int j = 0; j < 8; j++) if (env[k + j] > m) m = env[k + j];
-            double at = k * 16 * 176.4;            /* ticks -> output bytes */
+            double at = envt[k] * 176.4;           /* playback ms -> output bytes */
             int want = 0;
             for (int i = 0; i < g_song_n; i++) {
                 const SLOT *sl = &g_song[i];
                 if (sl->lib < 0 || sl->lib >= g_lib_n) continue;
                 double b0 = (double)sl->bar * BAR_UNITS;
-                double b1 = b0 + sl->bars * (double)BAR_UNITS;
+                /* The sample's own length, not the bars its block occupies: a
+                 * one-beat hit fills a bar of grid but only sounds for a beat,
+                 * and counting it as a bar would report silence as a fault. */
+                double b1 = b0 + (g_lib[sl->lib].len ? g_lib[sl->lib].len * 2.0
+                                                     : sl->bars * (double)BAR_UNITS);
                 if (at >= b0 && at < b1) want++;
             }
             printf("    %4.1f  %5.3f  %-4d |", at / BAR_UNITS, m, want);

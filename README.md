@@ -48,7 +48,8 @@ of ours.
 
 *Dance eJay 2's arrangement page, playing. Thirteen samples are placed across
 the tracks with `APlay` and drawn into the same lanes by `PXD32CL1.DLL` from the
-same list, so what is on the screen is what is coming out of the speakers. The
+same list, so what is on the screen is what is coming out of the speakers - the
+playhead is where the engine says it is, a bar every 1.714 seconds. The
 block labels and the browser rows are the samples' own two-line names, read out
 of their file headers - "Snare Beat / Risk", "Perc.L / Vers10", "Warm** /
 Line 1".*
@@ -115,6 +116,24 @@ ASetPfad(dir) → AStop → AMitte(0,0) → RWaveParam(60, 0x6666) → ASetFader
   sample, move a sample to one of the tracks"*. A block already in the grid
   drags along its lane, snapped to the bar; dropping it rebuilds the arrangement
   in the engine, because `APlay` appends and there is no move.
+
+- **The arrangement plays, in time.** Placing thirteen samples and getting a
+  song out of them turned on one number, and it was wrong from the first
+  `APlay`: 88,200 per bar, which is 120 BPM counted in samples. The engine
+  counts **output bytes** - its transport dword advances 176,400 for every
+  second of playback, 44,100 frames of 16-bit stereo - and Dance eJay's tempo is
+  a fixed **140 BPM**, so a bar is 1.714 seconds and **302,400** of them. At
+  88,200 a bar was half a second: sixteen bars of grid became eight, every
+  block's end landed inside its own audio, and the whole arrangement fired and
+  died in the first few seconds.
+
+  The sample files say the same number themselves. A `tPxD` header carries the
+  decoded length after the name and a `0x54` byte, as a byte count of 16-bit
+  mono - 151,200, exactly one bar at 140 BPM, and 37,800, exactly one beat - so
+  the host reads it out of the file and rounds it up to whole bars instead of
+  trusting `PXD.TXT`'s bar-count field. A block placed at bar 12 now sounds at
+  bar 12.0 on the engine's own clock, and a fourteen-bar arrangement plays
+  through and stops where it ends.
 
 - **The chrome responds.** `K_640` is eJay's control table - a name and ten
   numbers per control: where it sits, how big it is, and three source rectangles
