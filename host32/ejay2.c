@@ -270,6 +270,31 @@ static void snap_diff(HMODULE mod, const char *what, DWORD lo, DWORD hi, int max
  * nothing: 0x4342C is the handshake AStart spins on, 0x43394 / 0x4339C /
  * 0x433A4 are the three gates AGetTime checks before it will report a
  * position, and the word at track0+0x6A counts the samples APlay has placed. */
+/* The track records live at base+0x429C8, 0x84 apart. +0x6A is how many
+ * entries APlay has appended, +0x68 the cursor the mixer compares against it,
+ * +0x60 the word AStart's worker resets, +0x64 the entry array - and each entry
+ * is 0x108 bytes with start at +0 and end at +4. Reading them back is the only
+ * way to see what the engine thinks it has been given. */
+static void tracks(const char *when, int n)
+{
+    const char *b = (const char *)g_eng;
+    printf("  [%s] transport %d of %d\n", when,
+           *(int *)(b + 0x3A0C0), *(int *)(b + 0x3B150));
+    for (int t = 0; t < n; t++) {
+        const char *tr = b + 0x429C8 + t * 0x84;
+        int count = *(short *)(tr + 0x6A);
+        if (!count) continue;
+        printf("    track %d: count %d cursor %d w60 %d entries %p\n", t, count,
+               *(short *)(tr + 0x68), *(short *)(tr + 0x60),
+               *(void **)(tr + 0x64));
+        const char *ents = *(const char **)(tr + 0x64);
+        for (int e = 0; ents && e < count && e < 4; e++)
+            printf("      entry %d: start %d end %d id %d\n", e,
+                   *(int *)(ents + e * 0x108), *(int *)(ents + e * 0x108 + 4),
+                   *(short *)(ents + e * 0x108 + 0x10));
+    }
+}
+
 static void peek(const char *when)
 {
     const char *b = (const char *)g_eng;
@@ -304,7 +329,7 @@ static void peek(const char *when)
 typedef struct {
     char path[MAX_PATH];
     char l1[28], l2[28];
-    int  bars;
+    int  bars, len;             /* len is the decoded length in 44.1k samples */
 } SAMPLE;
 
 #define MAX_GROUPS 12
@@ -342,6 +367,44 @@ static char *slurp(const char *path, long *len)
     fclose(f);
     if (len) *len = n;
     return b;
+}
+
+/* The unit APlay's start and length arguments are in, measured rather than
+ * guessed. Two facts settle it:
+ *
+ *  - the engine's transport counter advances 176,400 per second of playback -
+ *    44,100 frames of 16-bit stereo, so its unit is an output byte, not a
+ *    sample. (Measured against AGetTime, which does report milliseconds.)
+ *  - Dance eJay's tempo is a fixed 140 BPM, so a 4/4 bar is 60*4/140 = 1.714
+ *    seconds. The sample files agree: a tPxD header declares 151,200 samples
+ *    for a two-bar loop, which is exactly two bars at that tempo.
+ *
+ * 1.714 seconds of output bytes is 302,400. The 88,200 this host used before was
+ * 120 BPM in samples - wrong tempo and wrong unit, a factor of 3.4 too short,
+ * which is why every block was cut off and the whole arrangement fired at once
+ * in the first few seconds. */
+#define BAR_UNITS 302400
+
+/* ---- how long a sample actually is --------------------------------------
+ * PXD.TXT's second field is read below as a bar count, and it is not reliable
+ * enough to time an arrangement with. The sample file says it exactly: a tPxD
+ * header is the tag, a Pascal-string name, a 0x54 byte, then the decoded length
+ * as a byte count of 16-bit mono PCM - 151,200 for a one-bar loop and 37,800
+ * for a one-beat hit, both exact at 140 BPM. The engine counts 16-bit stereo
+ * output bytes, so twice that is the length APlay wants. Bytes rather than
+ * samples is what the measurement said: an entry told it ran for two bars fell
+ * silent after one, every time. */
+static int pxd_length(const char *path)
+{
+    unsigned char h[64];
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t n = fread(h, 1, sizeof(h), f);
+    fclose(f);
+    if (n < 16 || memcmp(h, "tPxD", 4)) return 0;
+    unsigned k = 5u + h[4];                 /* past the tag and the name */
+    if (k + 5 > n || h[k] != 0x54) return 0;
+    return (int)(h[k+1] | (h[k+2] << 8) | (h[k+3] << 16) | (h[k+4] << 24));
 }
 
 /* `root` is the folder holding the two-letter sample directories; the index
@@ -383,8 +446,13 @@ static int load_index(const char *root)
         fq = next_field(fq, fld, sizeof(fld));
         if (!fq) break;
         snprintf(sm->path, sizeof(sm->path), "%s\\%s", root, fld);
-        sm->bars = atoi(bars);
-        if (sm->bars < 1 || sm->bars > 16) sm->bars = 2;
+        sm->len  = pxd_length(sm->path);
+        /* Whole bars, rounded up: a block occupies bars on eJay's grid, and the
+         * end an entry is given is also when the lane is free again. Rounding
+         * down would cut the tail off every loop that is not exactly on the
+         * bar. A quarter-bar hit still occupies one. */
+        sm->bars = sm->len ? (sm->len * 2 + BAR_UNITS - 1) / BAR_UNITS : atoi(bars);
+        if (sm->bars < 1 || sm->bars > 16) sm->bars = 1;
         g_lib_n++;
     }
     free(idx); free(files);
@@ -453,9 +521,6 @@ static int load_mix_names(const char *path)
 #define GRID_X1  596
 #define GRID_Y0  16
 #define GRID_Y1  323
-/* Sixteen bars at 120 BPM across the grid; AStart is told the whole length in
- * the same unit, and 0xA17FC0 is four minutes of it. */
-#define BAR_SAMPLES 88200
 #define BROWSE_X0 176
 #define BROWSE_X1 539
 #define BROWSE_Y0 366   /* below the transport bar that overlaps the panel */
@@ -828,7 +893,7 @@ static void rebuild_arrangement(void)
         if (sl->lib < 0 || sl->lib >= g_lib_n) continue;
         st[i] = 0x63;
         g_aplay(i + 1, 0, 0, 0, 0, &st[i], g_lib[sl->lib].path,
-                sl->lane, sl->bar * BAR_SAMPLES, sl->bars * BAR_SAMPLES,
+                sl->lane, sl->bar * BAR_UNITS, sl->bars * BAR_UNITS,
                 0, 0x100);
     }
     if (AStart) AStart(g_astart);
@@ -1301,7 +1366,7 @@ int main(int argc, char **argv)
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
     int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
     int seq = 0, trace_files = 0, song = 0, selftest = 0;
-    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, ending = 0, flat = 0, limit = 0, watch = 0, bigstack = 0, paintcheck = 0, playpos = 0, astart = 0xA17FC0, ids = 0;
+    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, ending = 0, flat = 0, limit = 0, watch = 0, bigstack = 0, paintcheck = 0, playpos = 0, playlen = 0, astart = 0xA17FC0, ids = 0, trackdump = 0;
     const char *libdir = NULL;
     /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
     int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
@@ -1334,11 +1399,14 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--paintcheck")) paintcheck = 1;
         else if (!strcmp(argv[i], "--pos") && i + 1 < argc) playpos = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ids")) ids = 1;
+        else if (!strcmp(argv[i], "--tracks")) trackdump = 1;
         else if (!strcmp(argv[i], "--astart") && i + 1 < argc)
             g_astart = astart = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bigstack")) bigstack = 1;
         else if (!strcmp(argv[i], "--flat") && i + 1 < argc) flat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--limit") && i + 1 < argc) limit = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--file") && i + 1 < argc) { playfile = argv[++i]; seq = 1; }
+        else if (!strcmp(argv[i], "--len") && i + 1 < argc) playlen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--init1")) first_minus1 = 1;
         else if (!strcmp(argv[i], "--ending")) ending = 1;
         else if (!strcmp(argv[i], "--group") && i + 1 < argc) g_group = atoi(argv[++i]);
@@ -1793,8 +1861,11 @@ int main(int argc, char **argv)
                  * sentinel that means "no end". An entry with no end plays from
                  * the moment the transport starts, which is why every block
                  * fired at once however far along the grid it was drawn. */
-                int start = sl->bar * BAR_SAMPLES;
-                int len   = sl->bars * BAR_SAMPLES;
+                int start = sl->bar * BAR_UNITS;
+                /* The sample's own declared length, not a multiple of the bar:
+                 * the engine stores entry+4 = start + len and stops there, so a
+                 * length short of the audio cut every block off part-way. */
+                int len   = sl->bars * BAR_UNITS;
                 APlay(ids ? i + 1 : 0, 0, 0, 0, 0, &st[i], g_lib[sl->lib].path,
                       flat ? 0 : sl->lane,
                       flat ? 0 : start, flat ? 0 : len, 0, 0x100);
@@ -1807,10 +1878,11 @@ int main(int argc, char **argv)
              * before; if it is anything else, it will not come in at all. That
              * is the whole question about the arrangement, in one variable. */
             int r = APlay(1, 0, 0, 0, 0, &status, full, 0, playpos,
-                          BAR_SAMPLES, 0, 0x100);
+                          playlen ? playlen : BAR_UNITS, 0, 0x100);
             printf("  APlay(%s) at %d -> %d, status %d\n", full, playpos, r, status);
         }
         peek("after APlay");
+        if (trackdump) tracks("after APlay", 8);
         /* The intro function's own order: AFenster, then DStart, then AStart -
          * DStart is not only the sample-preview path's business. */
         {
@@ -1821,6 +1893,7 @@ int main(int argc, char **argv)
         if (ASetFader)  ASetFader(0, 0);
         if (AStart)     printf("  AStart(astart)           -> %d\n", AStart(astart));
         peek("after AStart");
+        if (trackdump) tracks("after AStart", 8);
     }
 
     if (selftest && browser_selftest()) return 2;
@@ -1877,7 +1950,7 @@ int main(int argc, char **argv)
         return 0;
     }
     float peak = 0.0f;
-    static float env[600];
+    static float env[2400];
     int env_n = 0;
     double played = 0.0;   /* engine bytes from samples that already finished */
     DWORD t0 = GetTickCount();
@@ -1935,7 +2008,10 @@ int main(int argc, char **argv)
              * position by 882 and multiplies by 5 - while AStart's 0xA17FC0 is
              * samples. Sixteen bars at 120 BPM is 32,000 ms, and that is what
              * the grid is showing. */
-            draw_cursor(wnd, AGetTime(0) / 32000.0);
+            /* Sixteen bars of grid, and a bar is BAR_UNITS output bytes at
+                 * 176.4 per millisecond - 27.4 seconds, not the 32 guessed here
+                 * when a bar was thought to be 120 BPM. */
+                draw_cursor(wnd, AGetTime(0) / (BAR_UNITS / 176.4 * 16.0));
         else if (main_screen && dplay && DGetZeit) {
             /* Sixteen bars at 120 BPM is 32 seconds, and DGetZeit is a byte
              * offset into a 44.1kHz 16-bit stereo stream, so the sweep is the
@@ -1978,8 +2054,8 @@ int main(int argc, char **argv)
                         static short pst;
                         pst = 0x63;
                         g_aplay(g_song_n, 0, 0, 0, 0, &pst, g_lib[g_place].path,
-                                lane, atbar * BAR_SAMPLES,
-                                sl->bars * BAR_SAMPLES, 0, 0x100);
+                                lane, atbar * BAR_UNITS,
+                                sl->bars * BAR_UNITS, 0, 0x100);
                     }
                     printf("  placed %s / %s -> lane %d, bar %d, %d bars\n",
                            g_lib[g_place].l1, g_lib[g_place].l2, lane, atbar,
@@ -2013,9 +2089,32 @@ int main(int argc, char **argv)
         if (p > peak) peak = p;
         if (env_n < (int)(sizeof(env) / sizeof(env[0]))) env[env_n++] = p;
         if (seq && i % 50 == 0)
-            printf("    t=%5lums  AGetTime %8d  status %d  peak %.3f\n",
+            printf("    t=%5lums  AGetTime %8d  transport %9d  cur %d/%d  peak %.3f\n",
                    (unsigned long)(GetTickCount() - t0),
-                   AGetTime ? AGetTime(0) : -1, status, peak);
+                   AGetTime ? AGetTime(0) : -1,
+                   *(int *)((char *)g_eng + 0x3A0C0),
+                   *(short *)((char *)g_eng + 0x429C8 + 0x68),
+                   *(short *)((char *)g_eng + 0x429C8 + 0x6A), peak);
+        /* The engine says when it fired an entry: the track's cursor steps on
+         * as the transport passes each start. Printing AGetTime - real playback
+         * milliseconds - at that moment measures the unit of APlay's start
+         * argument directly, instead of inferring it from a meter that lags and
+         * a sample that fades in. */
+        if (trackdump) {
+            static short seen[8];
+            for (int t = 0; t < 8; t++) {
+                const char *tr = (const char *)g_eng + 0x429C8 + t * 0x84;
+                short cur = *(const short *)(tr + 0x68);
+                if (cur == seen[t]) continue;
+                seen[t] = cur;
+                const char *ents = *(const char *const *)(tr + 0x64);
+                if (!ents || cur < 1) continue;
+                printf("    fired track %d entry %d start %d at AGetTime %d ms  transport %d\n",
+                       t, cur - 1, *(const int *)(ents + (cur - 1) * 0x108),
+                       AGetTime ? AGetTime(0) : -1,
+                       *(const int *)((const char *)g_eng + 0x3A0C0));
+            }
+        }
         if (verbose && i % 25 == 0)
             printf("    tick %4d  %6lums  refresh %d\n", i,
                    (unsigned long)(GetTickCount() - t0), rc);
@@ -2034,11 +2133,26 @@ int main(int argc, char **argv)
      * scale; a loop has a beat in it, and the difference is visible in one
      * column of asterisks without anyone having to listen to it first. */
     if (env_n > 8) {
-        printf("  envelope, one row per 8 ticks (128ms):\n");
+        /* The measured envelope beside the arrangement that was asked for: each
+         * row is 128ms, `want` counts the blocks that should be sounding then.
+         * A row with blocks and no level is a sample that did not play; a row
+         * with level and no blocks is one that overran. That comparison is what
+         * says the timing is right, without anyone having to listen first. */
+        printf("  envelope vs arrangement, one row per 8 ticks (128ms):\n");
+        printf("     bar  level  want\n");
         for (int k = 0; k + 8 <= env_n; k += 8) {
             float m = 0;
             for (int j = 0; j < 8; j++) if (env[k + j] > m) m = env[k + j];
-            printf("    %5.3f |", m);
+            double at = k * 16 * 176.4;            /* ticks -> output bytes */
+            int want = 0;
+            for (int i = 0; i < g_song_n; i++) {
+                const SLOT *sl = &g_song[i];
+                if (sl->lib < 0 || sl->lib >= g_lib_n) continue;
+                double b0 = (double)sl->bar * BAR_UNITS;
+                double b1 = b0 + sl->bars * (double)BAR_UNITS;
+                if (at >= b0 && at < b1) want++;
+            }
+            printf("    %4.1f  %5.3f  %-4d |", at / BAR_UNITS, m, want);
             for (int j = 0; j < (int)(m * 40.0f + 0.5f); j++) putchar('#');
             putchar('\n');
         }

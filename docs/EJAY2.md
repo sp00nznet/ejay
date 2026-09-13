@@ -198,11 +198,76 @@ a real length the arrangement spreads out in time instead of firing at once.
 minutes. Too small and nothing plays at all: `AStart(0)` is silence, and so is
 `AStart(176400)` for a sample placed at 176400.
 
-**Still not right:** a single sample placed at a non-zero start still fires
-immediately. The arguments Dancejay fills and this host still passes as zero are
-2, 4 and 5 - `entry+0xFC`, `+0xF4` and `+0xF8` - taken from per-sample tables at
-`[0x53E8A0]`, `[0x53E5C8][i]` and `[0x53E580][i]`. That is where to look next.
+### The unit those arguments are in, measured
 
+An arrangement can have every argument right and still be nonsense if the
+numbers are in the wrong unit, and that is what was wrong here for longer than
+anything else. `APlay`'s start and length were being fed 88,200 per bar - 120 BPM
+counted in 44,100Hz samples - which is wrong twice over.
+
+**The engine counts output bytes.** Its transport position, a dword at
+`+0x3A0C0` that `AStart` resets to zero, advances 176,400 for every second of
+playback: 44,100 frames of 16-bit stereo. Measured against `AGetTime`, which does
+report milliseconds:
+
+```
+t= 1563ms  AGetTime 1220  transport 1273676
+t= 3079ms  AGetTime 2750  transport 1538276     264600 units per 1530 ms
+```
+
+**Dance eJay's tempo is a fixed 140 BPM**, so a 4/4 bar is 60*4/140 = 1.714
+seconds, which in those units is **302,400**. Two things agree with that number
+independently: `AStart`'s 0xA17FC0 is 10,584,000, exactly 35 bars, and the sample
+files say the same thing themselves - see below.
+
+The old 88,200 made a bar 0.5 seconds. Sixteen bars of grid became eight
+seconds, every block's end landed inside its own audio, and the whole thing fired
+and died in the first few seconds. That is the "played further but stopped
+playing the samples it passed over" report, entirely.
+
+### A sample file knows how long it is
+
+`PXD.TXT`'s second field per record was being read as a bar count and it does not
+survive checking. The sample file states it exactly. A `tPxD` header is the tag,
+a Pascal-string name, a `0x54` byte, then a length:
+
+```
+74 50 78 44  0A "Come on!\0\0"  54  A0 4E 02 00  -> 151200
+74 50 78 44  05 "Ray\0\0"       54  A8 93 00 00  ->  37800
+```
+
+That length is a byte count of 16-bit mono PCM, so twice it is the engine's unit:
+151,200 is one bar at 140 BPM to the byte, and 37,800 is one beat. Both land on
+musical values, which a wrong reading would not.
+
+Sweeping the length argument against how long sound actually comes out confirms
+where the sample ends rather than where the entry does:
+
+```
+len  151,200 (0.5 bar)  -> 0.64s of audio
+len  302,400 (1 bar)    -> 1.28s
+len  604,800 (2 bars)   -> 1.66s     saturated: the sample is one bar long
+```
+
+So the host rounds the measured length **up** to whole bars and hands that to
+`APlay`. Rounding down clips the tail off every loop that does not end exactly on
+the bar, and a block occupies whole bars on eJay's grid anyway - the end an entry
+is given is also when its lane is free again.
+
+The playhead follows from the same constant: sixteen bars of grid is
+`BAR_UNITS / 176.4 * 16` milliseconds, 27.4 seconds, not the 32 that a 120 BPM
+bar implied.
+
+### What the cursor field is not
+
+`entry+0x68` is a per-track cursor and it is tempting to read it as "the entry
+that is sounding". It is not, quite: `AStart`'s worker primes every track's
+cursor to 1 before a note has played, and the mixer then steps it on as it
+renders *ahead* of the playing position - the engine pre-renders about five
+seconds into its buffer the instant the transport starts, so half an arrangement
+can have been consumed before the first sound leaves the card. Reading that as
+"the engine fired everything at t=0" sent this host looking for a bug in the
+placement that was never there. The transport dword is the honest clock.
 ### RTimer is the pump, and ATimer is not
 
 **`ATimer` is a stub in this engine.** The entire function is:
