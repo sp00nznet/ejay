@@ -165,6 +165,44 @@ ASetPfad(dir) -> AStop -> AMitte(0,0) -> RWaveParam(60, 0x6666) -> ASetFader(0,0
 samples, and a bar at 120 BPM is 88,200 of them. `AGetTime` reports in
 milliseconds.
 
+### Two arguments that decide whether an arrangement is an arrangement
+
+Placing thirteen samples and hearing one is not a mixing problem. Two of
+`APlay`'s twelve arguments were wrong, and both are invisible from the outside:
+
+**Argument 1 is a sample id**, stored as a word at `entry+0x10`. Every simple
+call site in Dancejay passes 0 - the intro sound, the metronome, anything that
+is the only thing playing - so 0 looks like the normal value. The real placement
+sites, the ones at 0x49E000 that pass computed values in every slot, give each
+sample its own. Thirteen entries all claiming id 0 collide, and thirteen samples
+sound like one.
+
+**Argument 10 is the length**, and its absence is worse than it looks:
+
+```
+cmp  dword ptr [ebp+0x2c], 0        ; the length
+jle  no_end
+mov  edx, [ebp+0x28]                ; start
+add  edx, [ebp+0x2c]
+mov  [eax+4], edx                   ; end = start + length
+jmp  done
+no_end:
+mov  dword ptr [ecx+4], 0x6921CFF0  ; a sentinel
+```
+
+Pass zero and the entry gets no end, and an entry with no end plays from the
+moment the transport starts however far along the grid its block is drawn. With
+a real length the arrangement spreads out in time instead of firing at once.
+
+`AStart`'s own argument is the song length in the same unit - 0xA17FC0 is four
+minutes. Too small and nothing plays at all: `AStart(0)` is silence, and so is
+`AStart(176400)` for a sample placed at 176400.
+
+**Still not right:** a single sample placed at a non-zero start still fires
+immediately. The arguments Dancejay fills and this host still passes as zero are
+2, 4 and 5 - `entry+0xFC`, `+0xF4` and `+0xF8` - taken from per-sample tables at
+`[0x53E8A0]`, `[0x53E5C8][i]` and `[0x53E580][i]`. That is where to look next.
+
 ### RTimer is the pump, and ATimer is not
 
 **`ATimer` is a stub in this engine.** The entire function is:

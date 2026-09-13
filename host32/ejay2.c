@@ -453,6 +453,9 @@ static int load_mix_names(const char *path)
 #define GRID_X1  596
 #define GRID_Y0  16
 #define GRID_Y1  323
+/* Sixteen bars at 120 BPM across the grid; AStart is told the whole length in
+ * the same unit, and 0xA17FC0 is four minutes of it. */
+#define BAR_SAMPLES 88200
 #define BROWSE_X0 176
 #define BROWSE_X1 539
 #define BROWSE_Y0 366   /* below the transport bar that overlaps the panel */
@@ -634,6 +637,8 @@ static void draw_ctrl(HDC dst, const KCTRL *c, int state)
 static RECT g_browse = { BROWSE_X0, BROWSE_Y0, BROWSE_X1, BROWSE_Y1 };
 static int  g_scroll_x = SCROLL_X, g_scroll_w = 9;
 
+static int browser_rows(void);      /* defined just below */
+
 static void browser_geometry(void)
 {
     const KCTRL *c = find_ctrl("G_SAMPLE_WINDOW");
@@ -643,6 +648,9 @@ static void browser_geometry(void)
     }
     c = find_ctrl("K_SAMPLE_VSCROLL");
     if (c && c->w > 0) { g_scroll_x = c->x; g_scroll_w = c->w; }
+    printf("  browser panel              -> x %d..%d, y %d..%d, %d rows\n",
+           (int)g_browse.left, (int)g_browse.right,
+           (int)g_browse.top, (int)g_browse.bottom, browser_rows());
 }
 
 /* G_SAMPLE_WINDOW is the panel including its bezel, and text drawn at its very
@@ -785,6 +793,7 @@ static void paint_ctrl(HWND wnd, int i, int state)
     ReleaseDC(wnd, dc);
 }
 
+static int g_astart = 0xA17FC0;   /* what AStart is told the song is */
 static int g_drag = -1;      /* index into g_song, or -1 */
 static int g_drag_dx;        /* grab offset within the block, in bars */
 
@@ -818,10 +827,11 @@ static void rebuild_arrangement(void)
         const SLOT *sl = &g_song[i];
         if (sl->lib < 0 || sl->lib >= g_lib_n) continue;
         st[i] = 0x63;
-        g_aplay(0, 0, 0, 0, 0, &st[i], g_lib[sl->lib].path,
-                sl->lane, sl->bar * 88200, 0, 0, 0x100);
+        g_aplay(i + 1, 0, 0, 0, 0, &st[i], g_lib[sl->lib].path,
+                sl->lane, sl->bar * BAR_SAMPLES, sl->bars * BAR_SAMPLES,
+                0, 0x100);
     }
-    if (AStart) AStart(0xA17FC0);
+    if (AStart) AStart(g_astart);
 }
 
 static int browser_input(HWND h, UINT m, WPARAM w, LPARAM l)
@@ -919,6 +929,69 @@ static int browser_input(HWND h, UINT m, WPARAM w, LPARAM l)
         }
     }
     return 0;
+}
+
+/* ---- did we paint outside the lines? --------------------------------------
+ * Twice now the browser list has crept up over the panel frame, and both times
+ * it was only caught by eye. Compare the window against the chrome it was built
+ * from: every pixel that differs must be inside a region we are entitled to
+ * paint - the arrangement grid, the browser panel, the category buttons. It
+ * costs one blit and catches the whole class of mistake.
+ */
+static int paint_check(HWND wnd)
+{
+    if (!g_screen.hdc) return 0;
+    RECT rc;
+    GetClientRect(wnd, &rc);
+    int w = rc.right, h = rc.bottom;
+    int stride = ((w * 3) + 3) & ~3;
+    unsigned char *a = (unsigned char *)malloc((size_t)stride * h);
+    unsigned char *b = (unsigned char *)malloc((size_t)stride * h);
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 24;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    HDC wdc = GetDC(wnd), mdc = CreateCompatibleDC(wdc);
+    HBITMAP bm = CreateCompatibleBitmap(wdc, w, h);
+    HBITMAP old = (HBITMAP)SelectObject(mdc, bm);
+    BitBlt(mdc, 0, 0, w, h, wdc, 0, 0, SRCCOPY);
+    int ok = a && b &&
+             GetDIBits(mdc, bm, 0, h, a, &bi, DIB_RGB_COLORS) &&
+             GetDIBits((HDC)(INT_PTR)g_screen.hdc,
+                       (HBITMAP)GetCurrentObject((HDC)(INT_PTR)g_screen.hdc, OBJ_BITMAP),
+                       0, h, b, &bi, DIB_RGB_COLORS);
+    long stray = 0;
+    int fy = -1, fx = -1;
+    for (int y = 0; ok && y < h; y++) {
+        int sy = h - 1 - y;                     /* the DIBs come back bottom-up */
+        for (int x = 0; x < w; x++) {
+            const unsigned char *pa = a + (size_t)y * stride + x * 3;
+            const unsigned char *pb = b + (size_t)y * stride + x * 3;
+            int diff = abs(pa[0] - pb[0]) + abs(pa[1] - pb[1]) + abs(pa[2] - pb[2]);
+            if (diff <= 30) continue;
+            int inside =
+                (sy >= GRID_Y0 && sy < GRID_Y1 && x >= GRID_X0 && x < GRID_X1) ||
+                (sy >= (int)g_browse.top && sy < (int)g_browse.bottom &&
+                 x >= (int)g_browse.left && x < (int)g_browse.right + g_scroll_w) ||
+                (sy >= 340 && sy < 475 && ((x >= 100 && x < 170) || (x >= 555 && x < 635)));
+            if (!inside) { if (fy < 0) { fy = sy; fx = x; } stray++; }
+        }
+    }
+    free(a); free(b);
+    SelectObject(mdc, old);
+    DeleteObject(bm);
+    DeleteDC(mdc);
+    ReleaseDC(wnd, wdc);
+    if (!ok) { printf("  paint check                -> could not read back\n"); return 0; }
+    if (stray) printf("  paint check                -> %ld px outside, first at %d,%d\n",
+                      stray, fx, fy);
+    else printf("  paint check                -> ok, nothing outside the panels\n");
+    return stray != 0;
 }
 
 /* The hit-testing and the scroll clamp are the only real logic in here, so
@@ -1228,7 +1301,7 @@ int main(int argc, char **argv)
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
     int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
     int seq = 0, trace_files = 0, song = 0, selftest = 0;
-    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, ending = 0, flat = 0, limit = 0, watch = 0, bigstack = 0;
+    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, ending = 0, flat = 0, limit = 0, watch = 0, bigstack = 0, paintcheck = 0, playpos = 0, astart = 0xA17FC0, ids = 0;
     const char *libdir = NULL;
     /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
     int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
@@ -1258,6 +1331,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--probekey") && i + 1 < argc) probe_key = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dragtest")) dragtest = 1;
         else if (!strcmp(argv[i], "--watch")) watch = 1;
+        else if (!strcmp(argv[i], "--paintcheck")) paintcheck = 1;
+        else if (!strcmp(argv[i], "--pos") && i + 1 < argc) playpos = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--ids")) ids = 1;
+        else if (!strcmp(argv[i], "--astart") && i + 1 < argc)
+            g_astart = astart = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bigstack")) bigstack = 1;
         else if (!strcmp(argv[i], "--flat") && i + 1 < argc) flat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--limit") && i + 1 < argc) limit = atoi(argv[++i]);
@@ -1535,6 +1613,7 @@ int main(int argc, char **argv)
         snprintf(path, sizeof(path), "%s\\EJAY02A", gfxdir);
         load_bitmap(ALoad, &g_sheet, path);
         printf("  K_640 controls             -> %d\n", load_keys("K_640"));
+        browser_geometry();
     }
 
     /* ---- the arrangement -----------------------------------------------
@@ -1644,7 +1723,7 @@ int main(int argc, char **argv)
      *     ASetPfad(dir) -> AStop() -> AMitte(0,0) -> RWaveParam(60, 0x6666)
      *       -> ASetFader(0,0) -> APlay(0,0,0,0,0, &status, file, 0,0,0,0, 0x100)
      *
-     * and its play button then does ASetFader(0,0) -> AStart(0xA17FC0) and
+     * and its play button then does ASetFader(0,0) -> AStart(astart) and
      * pumps ATimer. 0xA17FC0 is 10,584,000 - four minutes at 44,100 - so
      * AStart is being told how long the arrangement is, not a magic number.
      *
@@ -1698,15 +1777,38 @@ int main(int argc, char **argv)
                  * is the shape that plays at full scale when a single sample is
                  * placed. If the arrangement is quiet and this is not, the
                  * fault is in the track or the position, not the samples. */
-                APlay(0, 0, 0, 0, 0, &st[i], g_lib[sl->lib].path,
+                /* Argument 1 is a sample id, stored as a word at entry+0x10.
+                 * Dancejay's real placement sites pass a distinct one per
+                 * sample; every simple site passes 0. Thirteen entries all
+                 * claiming id 0 is a plausible reason for thirteen samples
+                 * sounding like one. */
+                /* Argument 1 is a sample id, stored as a word at entry+0x10.
+                 * Dancejay's real placement sites pass a distinct one per
+                 * sample and every simple site passes 0; thirteen entries all
+                 * claiming id 0 is why thirteen samples sounded like one.
+                 *
+                 * Argument 10 is the length, and it matters more than it looks:
+                 * APlay stores entry+4 = start + length, but only when length
+                 * is positive - pass zero and it writes 0x6921CFF0 instead, a
+                 * sentinel that means "no end". An entry with no end plays from
+                 * the moment the transport starts, which is why every block
+                 * fired at once however far along the grid it was drawn. */
+                int start = sl->bar * BAR_SAMPLES;
+                int len   = sl->bars * BAR_SAMPLES;
+                APlay(ids ? i + 1 : 0, 0, 0, 0, 0, &st[i], g_lib[sl->lib].path,
                       flat ? 0 : sl->lane,
-                      flat ? 0 : sl->bar * 88200, 0, 0, 0x100);
+                      flat ? 0 : start, flat ? 0 : len, 0, 0x100);
                 placed++;
             }
             printf("  APlay x%d across %d tracks\n", placed, g_song_n);
         } else if (APlay) {
-            int r = APlay(0, 0, 0, 0, 0, &status, full, 0, 0, 0, 0, 0x100);
-            printf("  APlay(%s) -> %d, status %d\n", full, r, status);
+            /* One sample, placed where --pos says. If argument 9 is samples at
+             * 44,100 then --pos 176400 should come in at four seconds and not
+             * before; if it is anything else, it will not come in at all. That
+             * is the whole question about the arrangement, in one variable. */
+            int r = APlay(1, 0, 0, 0, 0, &status, full, 0, playpos,
+                          BAR_SAMPLES, 0, 0x100);
+            printf("  APlay(%s) at %d -> %d, status %d\n", full, playpos, r, status);
         }
         peek("after APlay");
         /* The intro function's own order: AFenster, then DStart, then AStart -
@@ -1717,7 +1819,7 @@ int main(int argc, char **argv)
             if (DStart)   printf("  DStart(0)                  -> %d\n", DStart(0));
         }
         if (ASetFader)  ASetFader(0, 0);
-        if (AStart)     printf("  AStart(0xA17FC0)           -> %d\n", AStart(0xA17FC0));
+        if (AStart)     printf("  AStart(astart)           -> %d\n", AStart(astart));
         peek("after AStart");
     }
 
@@ -1875,8 +1977,9 @@ int main(int argc, char **argv)
                     if (g_aplay) {
                         static short pst;
                         pst = 0x63;
-                        g_aplay(0, 0, 0, 0, 0, &pst, g_lib[g_place].path,
-                                lane, atbar * 88200, 0, 0, 0x100);
+                        g_aplay(g_song_n, 0, 0, 0, 0, &pst, g_lib[g_place].path,
+                                lane, atbar * BAR_SAMPLES,
+                                sl->bars * BAR_SAMPLES, 0, 0x100);
                     }
                     printf("  placed %s / %s -> lane %d, bar %d, %d bars\n",
                            g_lib[g_place].l1, g_lib[g_place].l2, lane, atbar,
@@ -1948,6 +2051,7 @@ int main(int argc, char **argv)
         if (DGetZeit) printf("  DGetZeit(%d) at end         -> %d\n", chan, DGetZeit(chan));
     }
 
+    if (paintcheck) paint_check(wnd);
     capture(wnd, shot);
     printf("  done\n");
     FreeLibrary(g_eng);
