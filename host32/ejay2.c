@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <windows.h>
 #include <mmsystem.h>
 #include <ctype.h>
@@ -517,10 +518,40 @@ static int load_mix_names(const char *path)
  * so the line is synchronised to the audio by construction rather than by a
  * timer that happens to agree.
  */
-#define GRID_X0  48
-#define GRID_X1  596
-#define GRID_Y0  16
-#define GRID_Y1  323
+/* The track grid, measured rather than eyeballed.
+ *
+ * These were read off a screenshot and the bottom one was 25 pixels out:
+ * `G_SPUREN_SAMPLE_640` in eJay's own control table puts the block area at
+ * y 18..298, and drawing to 323 put the bottom lanes over the horizontal
+ * scroll bar underneath it. Sixteen lanes, because `B_LAUT_01L` through 16 is
+ * how many volume controls the table carries. grid_geometry() replaces these
+ * with the table's numbers once K_640 is loaded; they are the fallback for a
+ * run without it. */
+static RECT g_grid = { 48, 16, 596, 323 };
+#define GRID_X0  ((int)g_grid.left)
+#define GRID_X1  ((int)g_grid.right)
+#define GRID_Y0  ((int)g_grid.top)
+#define GRID_Y1  ((int)g_grid.bottom)
+#define GRID_LANES 16
+
+/* Sixteen bars across the window. eJay's grid scrolls - `K_SPUR_HSCROLL` sits
+ * under it and the song is longer than what is shown - so this is how much of
+ * the song is visible, not how long a song can be. */
+#define GRID_BARS 16
+
+/* Bar to pixel, in one place. The old code had blocks stepping by an integer
+ * (GRID_X1-GRID_X0)/16 = 34 while the playhead swept the exact 548/16 = 34.25,
+ * so the line drifted off the blocks by a pixel per bar - five by bar 12, and
+ * it is the right-hand end of the grid where a beat looks least in step with
+ * the line. Both go through here now. */
+static int bar_x(double bar)
+{
+    return GRID_X0 + (int)((GRID_X1 - GRID_X0) * bar / GRID_BARS + 0.5);
+}
+static int lane_y(int lane)
+{
+    return GRID_Y0 + (int)((double)(GRID_Y1 - GRID_Y0) * lane / GRID_LANES + 0.5);
+}
 #define BROWSE_X0 176
 #define BROWSE_X1 539
 #define BROWSE_Y0 366   /* below the transport bar that overlaps the panel */
@@ -704,6 +735,22 @@ static int  g_scroll_x = SCROLL_X, g_scroll_w = 9;
 
 static int browser_rows(void);      /* defined just below */
 
+/* Same idea as browser_geometry: take the grid's rectangle from eJay's own
+ * control table instead of from a screenshot. G_SPUREN_SAMPLE_640 is the block
+ * area on the 640 art set; the plain name is the one the higher resolutions
+ * use, and is the fallback here. */
+static void grid_geometry(void)
+{
+    const KCTRL *c = find_ctrl("G_SPUREN_SAMPLE_640");
+    if (!c || c->w <= 0) c = find_ctrl("G_SPUREN_SAMPLE");
+    if (!c || c->w <= 0 || c->h <= 0) return;
+    g_grid.left = c->x; g_grid.top = c->y;
+    g_grid.right = c->x + c->w; g_grid.bottom = c->y + c->h;
+    printf("  track grid                 -> x %d..%d, y %d..%d, %d lanes of %d px,"
+           " %d bars of %d px\n", GRID_X0, GRID_X1, GRID_Y0, GRID_Y1,
+           GRID_LANES, lane_y(1) - lane_y(0), GRID_BARS, bar_x(1) - bar_x(0));
+}
+
 static void browser_geometry(void)
 {
     const KCTRL *c = find_ctrl("G_SAMPLE_WINDOW");
@@ -735,17 +782,18 @@ static int browser_rows(void)
 static void draw_blocks(HDC dst)
 {
     if (!g_zeich || !g_griddc || !g_screen.hdc) return;
-    const int bar = (GRID_X1 - GRID_X0) / 16;
     BitBlt(dst, GRID_X0, GRID_Y0, GRID_X1 - GRID_X0, GRID_Y1 - GRID_Y0,
            (HDC)(INT_PTR)g_screen.hdc, GRID_X0, GRID_Y0, SRCCOPY);
+    int lane_h = lane_y(1) - lane_y(0);
     for (int i = 0; i < g_song_n; i++) {
         const SLOT *sl = &g_song[i];
-        int w = sl->bars * bar, style = g_tex[i % 3];
+        int x0 = bar_x(sl->bar), w = bar_x(sl->bar + sl->bars) - x0;
+        int style = g_tex[i % 3];
         const SAMPLE *sm = (sl->lib >= 0 && sl->lib < g_lib_n) ? &g_lib[sl->lib] : NULL;
-        if (!style || w < 4) continue;
+        if (!style || w < 4 || sl->lane >= GRID_LANES) continue;
         g_zeich(style, 0, w, sm ? sm->l1 : "Sample", sm ? sm->l2 : "", 0, 0);
-        BitBlt(dst, GRID_X0 + sl->bar * bar, GRID_Y0 + sl->lane * 18 + 1,
-               w - 2, 16, (HDC)(INT_PTR)g_griddc, 0, 0, SRCCOPY);
+        BitBlt(dst, x0, lane_y(sl->lane) + 1, w - 2, lane_h - 2,
+               (HDC)(INT_PTR)g_griddc, 0, 0, SRCCOPY);
     }
 }
 
@@ -862,13 +910,13 @@ static int g_astart = 0xA17FC0;   /* what AStart is told the song is */
 static int g_drag = -1;      /* index into g_song, or -1 */
 static int g_drag_dx;        /* grab offset within the block, in bars */
 
-static int bar_width(void) { return (GRID_X1 - GRID_X0) / 16; }
+static int bar_width(void) { return bar_x(1) - bar_x(0); }
 
 static int slot_at(int x, int y)
 {
     if (x < GRID_X0 || x >= GRID_X1 || y < GRID_Y0 || y >= GRID_Y1) return -1;
-    int lane = (y - GRID_Y0) / 18;
-    int bar  = (x - GRID_X0) / bar_width();
+    int lane = (y - GRID_Y0) * GRID_LANES / (GRID_Y1 - GRID_Y0);
+    int bar  = (x - GRID_X0) * GRID_BARS / (GRID_X1 - GRID_X0);
     for (int i = 0; i < g_song_n; i++)
         if (g_song[i].lane == lane && bar >= g_song[i].bar &&
             bar < g_song[i].bar + g_song[i].bars) return i;
@@ -905,7 +953,7 @@ static int browser_input(HWND h, UINT m, WPARAM w, LPARAM l)
      * and the arrangement goes back to the engine when it is dropped. */
     if (m == WM_MOUSEMOVE && g_drag >= 0) {
         SLOT *sl = &g_song[g_drag];
-        int bar = ((short)LOWORD(l) - GRID_X0) / bar_width() - g_drag_dx;
+        int bar = ((short)LOWORD(l) - GRID_X0) * GRID_BARS / (GRID_X1 - GRID_X0) - g_drag_dx;
         if (bar < 0) bar = 0;
         if (bar + sl->bars > 16) bar = 16 - sl->bars;
         if (bar != sl->bar) {
@@ -932,7 +980,7 @@ static int browser_input(HWND h, UINT m, WPARAM w, LPARAM l)
         int hit = slot_at((short)LOWORD(l), (short)HIWORD(l));
         if (hit >= 0) {
             g_drag = hit;
-            g_drag_dx = ((short)LOWORD(l) - GRID_X0) / bar_width() - g_song[hit].bar;
+            g_drag_dx = ((short)LOWORD(l) - GRID_X0) * GRID_BARS / (GRID_X1 - GRID_X0) - g_song[hit].bar;
             SetCapture(h);
             return 1;
         }
@@ -1100,7 +1148,7 @@ static void draw_cursor(HWND wnd, double frac)
     if (frac < 0.0) frac = 0.0;
     if (frac > 1.0) frac = 1.0;
     g_cursor_frac = frac;
-    int x = GRID_X0 + (int)((GRID_X1 - GRID_X0) * frac);
+    int x = bar_x(frac * GRID_BARS);
 
     HDC dc = GetDC(wnd);
     /* Erase by copying the chrome back from the DIB the engine loaded, the
@@ -1366,7 +1414,7 @@ int main(int argc, char **argv)
     int ticks = 120, volume = 20, atyp = 3, dplay = 0, chan = 9;
     int intro = 1, scrcap = 0, frames = 0, verbose = 0, main_screen = 0, samples = 0;
     int seq = 0, trace_files = 0, song = 0, selftest = 0;
-    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, ending = 0, flat = 0, limit = 0, watch = 0, bigstack = 0, paintcheck = 0, playpos = 0, playlen = 0, astart = 0xA17FC0, ids = 0, trackdump = 0;
+    int probe_ms = -1, probe_key = 0, dragtest = 0, first_minus1 = 0, ending = 0, flat = 0, limit = 0, watch = 0, bigstack = 0, paintcheck = 0, playpos = 0, playlen = 0, onset = 0, latency = 0, astart = 0xA17FC0, ids = 0, trackdump = 0;
     const char *libdir = NULL;
     /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
     int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
@@ -1407,6 +1455,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--limit") && i + 1 < argc) limit = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--file") && i + 1 < argc) { playfile = argv[++i]; seq = 1; }
         else if (!strcmp(argv[i], "--len") && i + 1 < argc) playlen = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--onset") && i + 1 < argc) onset = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--latency") && i + 1 < argc) latency = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--init1")) first_minus1 = 1;
         else if (!strcmp(argv[i], "--ending")) ending = 1;
         else if (!strcmp(argv[i], "--group") && i + 1 < argc) g_group = atoi(argv[++i]);
@@ -1682,6 +1732,7 @@ int main(int argc, char **argv)
         load_bitmap(ALoad, &g_sheet, path);
         printf("  K_640 controls             -> %d\n", load_keys("K_640"));
         browser_geometry();
+    grid_geometry();
     }
 
     /* ---- the arrangement -----------------------------------------------
@@ -1972,8 +2023,8 @@ int main(int argc, char **argv)
          * grab the first block, walk it six bars along its lane, drop it. */
         if (dragtest && i == 20 && g_song_n) {
             int bw = bar_width();
-            int y = GRID_Y0 + g_song[0].lane * 18 + 8;
-            int x0 = GRID_X0 + g_song[0].bar * bw + 4;
+            int y = lane_y(g_song[0].lane) + (lane_y(1) - lane_y(0)) / 2;
+            int x0 = bar_x(g_song[0].bar) + 4;
             printf("  dragtest: block 0 at bar %d\n", g_song[0].bar);
             browser_input(wnd, WM_LBUTTONDOWN, 0, MAKELPARAM(x0, y));
             for (int b = 1; b <= 6; b++)
@@ -2007,14 +2058,16 @@ int main(int argc, char **argv)
          * does; a synthetic i*16 runs the animation at whatever rate the host
          * manages instead. */
         if (main_screen && seq && AGetTime)
-            /* AGetTime reports milliseconds - it divides the engine's byte
-             * position by 882 and multiplies by 5 - while AStart's 0xA17FC0 is
-             * samples. Sixteen bars at 120 BPM is 32,000 ms, and that is what
-             * the grid is showing. */
-            /* Sixteen bars of grid, and a bar is BAR_UNITS output bytes at
-                 * 176.4 per millisecond - 27.4 seconds, not the 32 guessed here
-                 * when a bar was thought to be 120 BPM. */
-                draw_cursor(wnd, AGetTime(0) / (BAR_UNITS / 176.4 * 16.0));
+            /* AGetTime reports milliseconds: it divides the engine's byte
+             * position by 882 and multiplies by 5. Sixteen bars of grid at
+             * BAR_UNITS bytes a bar, 176.4 bytes to the millisecond, is 27.4
+             * seconds - not the 32 that a 120 BPM bar implied. */
+            /* --latency backs the line off by the output delay. Measured with
+             * --onset, a beat leaves the endpoint 40-100ms after AGetTime says
+             * its block started; a host tick is 31ms of that on its own, so the
+             * rest is the card's own buffer and it is a knob, not a constant -
+             * different hardware will want a different number. */
+            draw_cursor(wnd, (AGetTime(0) - latency) / (BAR_UNITS / 176.4 * GRID_BARS));
         else if (main_screen && dplay && DGetZeit) {
             /* Sixteen bars at 120 BPM is 32 seconds, and DGetZeit is a byte
              * offset into a 44.1kHz 16-bit stereo stream, so the sweep is the
@@ -2026,7 +2079,7 @@ int main(int argc, char **argv)
                 fn_i_pii DPF = (fn_i_pii) GetProcAddress(g_eng, "DPlayFile");
                 if (DPF) DPF(playfile, 0, chan);
             }
-            draw_cursor(wnd, (played + DGetZeit(chan)) / (176400.0 * 32.0));
+            draw_cursor(wnd, (played + DGetZeit(chan)) / (BAR_UNITS * 16.0));
         }
         int rc = 0;
         if (intro && Refresh) rc = Refresh((int)(GetTickCount() - t0));
@@ -2090,6 +2143,38 @@ int main(int argc, char **argv)
         pump_messages();
         float p = meter_peak();
         if (p > peak) peak = p;
+        /* Where the playhead is when a beat actually leaves the sound card.
+         *
+         * The endpoint meter is the audible signal, so a rising edge on it is an
+         * onset the user hears. Printing the engine's clock, the playhead's own
+         * pixel column and the column the block starts at, at that instant, is
+         * the picture-against-sound comparison, in numbers - and `--onset N`
+         * also saves the first N frames so the same thing can be looked at. */
+        if (onset && main_screen) {
+            static int quiet = 8, shots = 0;
+            if (p < 0.010f) { if (quiet < 8) quiet++; }
+            else if (quiet >= 4) {
+                quiet = 0;
+                int ms   = AGetTime ? AGetTime(0) : 0;
+                double b = ms / (BAR_UNITS / 176.4);            /* bars played */
+                int headx = bar_x(b);
+                int best = -1;
+                for (int k = 0; k < g_song_n; k++)
+                    if (best < 0 || fabs(g_song[k].bar - b) < fabs(g_song[best].bar - b))
+                        best = k;
+                int blockx = best < 0 ? -1 : bar_x(g_song[best].bar);
+                printf("    onset at %6d ms = bar %5.2f  playhead x=%3d"
+                       "  nearest block bar %2d x=%3d  off %+4d px %+6.0f ms\n",
+                       ms, b, headx, best < 0 ? -1 : g_song[best].bar, blockx,
+                       best < 0 ? 0 : headx - blockx,
+                       best < 0 ? 0.0 : (b - g_song[best].bar) * (BAR_UNITS / 176.4));
+                if (shot && shots < onset) {
+                    char f[MAX_PATH];
+                    snprintf(f, sizeof(f), "%s.onset%d.bmp", shot, shots++);
+                    capture(wnd, f);
+                }
+            }
+        }
         if (env_n < (int)(sizeof(env) / sizeof(env[0]))) {
             envt[env_n] = AGetTime ? AGetTime(0) : 0;
             env[env_n++] = p;

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tools:
+    name: Analysis tools and conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: python -m pip install --upgrade pip capstone pefile flake8
+      - name: Lint
+        run: flake8 tools --max-line-length 100
+      - name: Byte-compile
+        run: python -m compileall -q tools
+      - name: Conformance harness
+        # No disc in CI, so this reports that it has nothing to check and exits
+        # 0. Run it locally against your own install for the real number, which
+        # the README carries.
+        run: python tools/conform.py
+
+  host:
+    name: eJay 2 host (32-bit)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+      - name: Build
+        # The host loads two 32-bit 1999 DLLs, so it is 32-bit itself. It builds
+        # without them present; it needs them only to run.
+        run: cl /nologo /W3 /MD host32\ejay2.c /Fe:ejay2.exe user32.lib gdi32.lib winmm.lib ole32.lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ejay2-host
+          path: ejay2.exe

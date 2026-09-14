@@ -15,6 +15,16 @@ alongside the same-era Win16/Win32 arc of DinoPark Tycoon (1993), El-Fish
 
 ## Status
 
+**Alpha, unreleased, no tag yet.** Dance eJay 2's host is usable if you have the
+discs - it draws the arrangement page and plays an arrangement in time. Dance
+eJay 1's engine is recompiled and streams audio, but its sampler path is still
+silent. Neither is something you can install; both need your own copy of the
+application beside them. [ROADMAP](ROADMAP.md) is what is next,
+[CHANGELOG](CHANGELOG.md) is what has landed.
+
+Format conformance against a local Dance eJay 1 + 2 install: **5,834 passed,
+8 failed**, the eight known and listed under Getting Started.
+
 **It plays, and it draws.** The 1997 engine initialises, decodes its intro
 sample, streams it to a real sound card at 22,050 Hz, and animates its playback
 cursor in a window - at the same time, out of recompiled 16-bit machine code.
@@ -317,7 +327,9 @@ liftable, with the whole VB runtime to answer.
 
 ## Roadmap
 
-Each phase ends with something that runs, not something that compiles.
+The near-term list - what is being worked on now, and what is deliberately
+deferred - is in [ROADMAP](ROADMAP.md). This is the longer arc: each phase ends
+with something that runs, not something that compiles.
 
 **Phase 1 — `DANCE02.DLL`, the 1997 engine.**
 One code segment, one data segment, small model, 313 relocations, 34 named
@@ -376,6 +388,106 @@ work/           scratch analysis output
 `../tools` is a checkout of [pcrecomp](https://github.com/sp00nznet/pcrecomp),
 the same sibling layout the other pcrecomp-family projects use.
 
+## Getting Started
+
+You need your own discs. Nothing from either one is in this repository, and the
+hosts read everything - artwork, layout, samples - off the install at runtime.
+
+1. **Prerequisites.** Windows 10 or 11. Visual Studio Build Tools 2019 or newer
+   (the eJay 2 host is 32-bit, so install the **x86** toolchain). Python 3.11 or
+   newer with `capstone` and `pefile` for the analysis tools. MinGW-w64 GCC,
+   CMake and Ninja only if you are building the eJay 1 recompilation.
+
+   ```
+   python -m pip install capstone pefile
+   ```
+
+2. **Install the applications** from your discs, or copy the disc contents to a
+   folder. Put them under `original/` if you want the defaults to find them:
+
+   ```
+   original/ejay1/DANCE/            Dance eJay 1, including DMACHINE/
+   original/ejay2/D_ejay2/ejay/     Dance eJay 2, the program folder
+   original/ejay2/MIX/              its thirteen saved arrangements
+   ```
+
+3. **Check the install.** The conformance harness reads every sample, control
+   table and index it can find and says whether they are what this project
+   believes they are:
+
+   ```
+   python tools/conform.py
+   ```
+
+   A good run on Dance eJay 1 + 2 together reports **5,834 passed, 8 failed**.
+   The eight are real and known: five library samples that are genuinely not a
+   whole number of beats, two intro files that are songs rather than loops, and
+   `METRO.PXD`, which is a plain RIFF WAV. The harness fails the build only if
+   that number gets worse.
+
+4. **Build the eJay 2 host.** From an x86 developer prompt, or with the batch
+   file, which finds the x86 toolchain itself:
+
+   ```
+   host32\build.bat host32\ejay2.c host32\ejay2.exe
+   ```
+
+5. **Run it.** From the Dance eJay 2 program folder, because the DLLs and the
+   artwork are loaded by relative path:
+
+   ```
+   cd original\ejay2\D_ejay2\ejay
+   ..\..\..\..\host32\ejay2.exe --lib ..\..\..\ejay1\DANCE --song --ticks 0
+   ```
+
+   You should get the arrangement page at 640x480, thirteen sample blocks across
+   the lanes with their own names on them, a working browser in the bottom
+   panel, and the playhead sweeping the grid while the arrangement plays. The
+   console reports what it loaded:
+
+   ```
+   sample library             -> 1352 samples under ..\..\..\ejay1\DANCE
+   track grid                 -> x 47..596, y 18..298, 16 lanes of 18 px, 16 bars of 34 px
+   browser panel              -> x 178..537, y 380..473, 7 rows
+   APlay x13 across 13 tracks
+   ```
+
+   **Volume starts low on purpose.** `--volume` is the engine's own scale, 0 to
+   32768 on an exponential curve, and it defaults to 20. A bring-up run can put
+   an unfilled buffer on the endpoint, so turn it up only once you hear the
+   arrangement.
+
+## Usage
+
+```
+# the arrangement page, held open until you close the window
+ejay2.exe --lib <eJay 1 DANCE folder> --song --ticks 0
+
+# play a generated arrangement for about 30 seconds and report what came out
+ejay2.exe --lib <DANCE> --song --ids --volume 8 --ticks 1100
+
+# where the playhead is when a beat actually leaves the sound card,
+# with a frame saved at each of the first four onsets
+ejay2.exe --lib <DANCE> --song --onset 4 --shot out --ticks 900
+
+# back the playhead off by the output latency of your card, in milliseconds
+ejay2.exe --lib <DANCE> --song --latency 70 --ticks 0
+
+# one sample through the sequencer at a given position and length, in engine
+# units: 302,400 to the bar
+ejay2.exe --file <a .PXD> --pos 3628800 --len 604800 --volume 8 --ticks 900
+
+# the start-up system check
+ejay2.exe --ticks 900
+
+# checks that need no mouse and no ears
+ejay2.exe --lib <DANCE> --song --selftest --paintcheck --dragtest --ticks 60
+```
+
+`--ticks 0` keeps the window up until you close it, which is the only way to
+click anything. `--verbose` and `--tracks` report what the engine is doing with
+what it was given.
+
 ## Building
 
 MinGW-w64 GCC, CMake, Ninja, and Python 3 with `capstone` and `pefile`. IDA is
@@ -432,15 +544,6 @@ python ../tools/tools/pe/pe_analyze.py original/ejay2/D_ejay2/ejay/Dancejay.exe
 ```
 
 Nothing builds yet. This section grows as the phases land.
-
-## About the screenshots
-
-The images above show this project running, to record that it works. Dance eJay
-and its interface artwork are the property of their rights holders - PXD
-Musicsoft / Fast Trak / eJay AG - and nothing here claims otherwise, nor is any
-of it redistributed: the background is read at runtime from a disc you supply,
-and the repository contains no application files. Same posture as the other recomp
-projects here.
 
 ## Legal
 
