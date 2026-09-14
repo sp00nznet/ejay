@@ -29,8 +29,14 @@
 #include <mmsystem.h>
 #include <ctype.h>
 
+/* Dance eJay 2's pair. The engine is named for its title - D4 for Dance, H4 for
+ * HipHop - and the graphics DLL is the same file in both, so --engine is all it
+ * takes to point this host at a sibling. PXD32H4 exports every one of PXD32D4's
+ * 87 functions and adds seven of its own. */
 #define ENGINE "PXD32D4.DLL"
 #define GFXDLL "PXD32CL1.DLL"
+static const char *g_engine_name = ENGINE;
+static const char *g_gfx_name    = GFXDLL;
 
 /* Win16 PASCAL became __stdcall in the 32-bit port; the exports are
  * undecorated because they come from a .DEF file.
@@ -1419,6 +1425,7 @@ int main(int argc, char **argv)
     /* The SAMPLE block of FONTS reads: Small Fonts / normal / 10 / 1 / -1 / 6. */
     int fontsize = 10, face_a = 1, face_b = -1, face_c = 6;
     const char *gfxdir = "GRAFIKA";
+    const char *palname = "DANCE2";
     const char *shot = NULL;
     /* METRO.PXD, the metronome, is the only real sample on the install disc -
      * the library itself lives on the second one. DINTRO.PXD is a mix, not a
@@ -1457,6 +1464,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--len") && i + 1 < argc) playlen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--onset") && i + 1 < argc) onset = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--latency") && i + 1 < argc) latency = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--engine") && i + 1 < argc) g_engine_name = argv[++i];
+        else if (!strcmp(argv[i], "--gfxdll") && i + 1 < argc) g_gfx_name = argv[++i];
+        else if (!strcmp(argv[i], "--pal") && i + 1 < argc) palname = argv[++i];
         else if (!strcmp(argv[i], "--init1")) first_minus1 = 1;
         else if (!strcmp(argv[i], "--ending")) ending = 1;
         else if (!strcmp(argv[i], "--group") && i + 1 < argc) g_group = atoi(argv[++i]);
@@ -1474,11 +1484,11 @@ int main(int argc, char **argv)
     }
 
     printf("Dance eJay 2 - driving the 1999 DLLs directly\n\n");
-    g_eng = LoadLibraryA(ENGINE);
-    g_gfx = LoadLibraryA(GFXDLL);
-    if (!g_eng) { printf("cannot load %s (%lu)\n", ENGINE, GetLastError()); return 1; }
-    printf("  %s at %p\n", ENGINE, (void *)g_eng);
-    if (g_gfx) printf("  %s at %p\n", GFXDLL, (void *)g_gfx);
+    g_eng = LoadLibraryA(g_engine_name);
+    g_gfx = LoadLibraryA(g_gfx_name);
+    if (!g_eng) { printf("cannot load %s (%lu)\n", g_engine_name, GetLastError()); return 1; }
+    printf("  %s at %p\n", g_engine_name, (void *)g_eng);
+    if (g_gfx) printf("  %s at %p\n", g_gfx_name, (void *)g_gfx);
 
     if (libdir) {
         printf("  sample library             -> %d samples under %s\n",
@@ -1635,7 +1645,12 @@ int main(int argc, char **argv)
             }
             if (watch) snap_diff(g_gfx, "InitScreenCopy", 0x2EAC8, 0x2EAC8 + 0x8500, 200);
         } else {
-            printf("  ! no bitmap - run this from the ejay folder\n");
+            /* HipHop eJay 2 ships no EJAY31A at all - its GRAFIKA has no intro
+             * set, so the title simply has no system check. Run the animation
+             * without the bitmaps it draws from and the DLL faults inside its
+             * own refresh; there is nothing to show, so do not show it. */
+            printf("  ! no intro bitmaps in %s - skipping the system check\n", gfxdir);
+            intro = 0;
         }
 
         snprintf(path, sizeof(path), "%s\\EJAY33A", gfxdir);
@@ -1765,9 +1780,18 @@ int main(int argc, char **argv)
         printf("  GFX_SampleInit              -> %08X (the grid memory DC)\n", griddc);
         int tex[3] = { 0, 0, 0 };
         if (AddTex) {
-            tex[0] = AddTex("TEXTURE.BMP",  "TEXTURE2.BMP", "DANCE2.PAL",  12, 25, 112);
-            tex[1] = AddTex("TEXTUREA.BMP", "TEXTURA2.BMP", "DANCE2A.PAL", 12, 25, 112);
-            tex[2] = AddTex("TEXTUREB.BMP", "TEXTURB2.BMP", "DANCE2B.PAL", 12, 25, 112);
+            /* The three marbled fills are the same file names in every title,
+             * but the palettes beside them are named for the title - DANCE2 for
+             * Dance eJay 2, HH2 for HipHop - so --pal switches them. Without it
+             * the blocks come out black: the texture registers, and then has no
+             * colours to draw with. */
+            char pal[3][MAX_PATH];
+            snprintf(pal[0], sizeof(pal[0]), "%s.PAL",  palname);
+            snprintf(pal[1], sizeof(pal[1]), "%sA.PAL", palname);
+            snprintf(pal[2], sizeof(pal[2]), "%sB.PAL", palname);
+            tex[0] = AddTex("TEXTURE.BMP",  "TEXTURE2.BMP", pal[0], 12, 25, 112);
+            tex[1] = AddTex("TEXTUREA.BMP", "TEXTURA2.BMP", pal[1], 12, 25, 112);
+            tex[2] = AddTex("TEXTUREB.BMP", "TEXTURB2.BMP", pal[2], 12, 25, 112);
             printf("  GFX_SampleAddTexturePair    -> %d %d %d\n", tex[0], tex[1], tex[2]);
         }
 

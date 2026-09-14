@@ -29,10 +29,10 @@ and has to be lifted before anything can drive it at all.
   stereo, so neither eJay exposes a device picker. The host can add one by
   filtering `waveOutGetDevCaps` through the DLL's import table, which is the same
   mechanism already used to count its GDI calls.
-- **A sibling title.** Dance eJay 2's engine shipped under a dozen other eJay
-  covers. Standing one up against the same host is the test of whether any of
-  this generalises, and it is cheap: the host reads its layout, library and
-  artwork from the disc.
+- **More sibling titles.** HipHop eJay 2 already runs - see the README. The
+  same three flags should reach Techno eJay, Rave eJay and the rest of the
+  1999-2002 run; what is not known is how far back the layout format goes, since
+  Rave eJay is 1997 and shares the era of Dance eJay 1 rather than 2.
 
 ## Deferred
 

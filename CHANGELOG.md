@@ -26,6 +26,11 @@ use without their own discs. `Unreleased` is maintained as work lands.
 - `tools/dll_signatures.py`: argument counts by CFG walk rather than linear sweep.
 - `tools/conform.py`: conformance harness. Parses every sample, control table,
   page list and saved arrangement on a local disc and reports a pass/fail count.
+- **A second title.** `--engine`, `--gfxdll` and `--pal` point the host at a
+  sibling: HipHop eJay 2 (2000) draws and plays through the same code. Its
+  graphics DLL is the same 23 exports, its audio engine a strict superset of
+  Dance eJay 2's 87. The host no longer assumes Dance's palette names, and skips
+  the system check when a title ships no intro bitmaps, which HipHop does not.
 - Host measurement flags: `--onset` (where the playhead is when a beat leaves the
   sound card), `--tracks`, `--paintcheck`, `--file`, `--len`, `--selftest`.
 
