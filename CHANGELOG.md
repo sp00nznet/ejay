@@ -25,7 +25,8 @@ use without their own discs. `Unreleased` is maintained as work lands.
   record layout and `ALautSet`'s scale all came out of it.
 - `tools/dll_signatures.py`: argument counts by CFG walk rather than linear sweep.
 - `tools/conform.py`: conformance harness. Parses every sample, control table,
-  page list and saved arrangement on a local disc and reports a pass/fail count.
+  page list and saved arrangement on a local disc and reports a pass/fail count -
+  9,780 pass against Dance eJay 1 + 2 and HipHop eJay 2, with 8 known exceptions.
 - **A second title.** `--engine`, `--gfxdll` and `--pal` point the host at a
   sibling: HipHop eJay 2 (2000) draws and plays through the same code. Its
   graphics DLL is the same 23 exports, its audio engine a strict superset of

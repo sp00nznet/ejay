@@ -16,14 +16,15 @@ alongside the same-era Win16/Win32 arc of DinoPark Tycoon (1993), El-Fish
 ## Status
 
 **Alpha, unreleased, no tag yet.** Dance eJay 2's host is usable if you have the
-discs - it draws the arrangement page and plays an arrangement in time. Dance
-eJay 1's engine is recompiled and streams audio, but its sampler path is still
+discs - it draws the arrangement page and plays an arrangement in time, and the
+same host runs **HipHop eJay 2** off its own disc with three flags. Dance eJay
+1's engine is recompiled and streams audio, but its sampler path is still
 silent. Neither is something you can install; both need your own copy of the
 application beside them. [ROADMAP](ROADMAP.md) is what is next,
 [CHANGELOG](CHANGELOG.md) is what has landed.
 
-Format conformance against a local Dance eJay 1 + 2 install: **5,834 passed,
-8 failed**, the eight known and listed under Getting Started.
+Format conformance against a local Dance eJay 1 + 2 + HipHop eJay 2 install:
+**9,780 passed, 8 failed**, the eight known and listed under Getting Started.
 
 **It plays, and it draws.** The 1997 engine initialises, decodes its intro
 sample, streams it to a real sound card at 22,050 Hz, and animates its playback
@@ -285,6 +286,46 @@ every sample worth playing.
 The stack-balance check in the harness came out of the same instinct and
 immediately caught the test itself calling three exports with an empty stack.
 
+### It is not just Dance eJay: HipHop eJay 2 runs on the same host
+
+The engine shipped under a dozen eJay covers, and the test of whether any of
+this work generalises is to point it at one of the others. HipHop eJay 2 (2000)
+runs on this host with **four flags and no code changes to the engine path**:
+
+![HipHop eJay 2 on the same host](docs/img/hiphop2-workspace.png)
+
+*HipHop eJay 2's arrangement page, playing, out of the same `host32/ejay2.exe`
+that draws Dance eJay 2's. Its own artwork, its own control table, its own
+buttons - Loop, Drum, Bass, Keys, Guitar, Xtra down the left, Rap, Voice, FX,
+Wave, Record, Groove down the right - and its own palette on the blocks.*
+
+```
+ejay2.exe --engine pxd32h4.dll --pal hh2 --song --lib <a DANCE library>
+```
+
+What is shared and what is not, compared directly:
+
+| | Dance eJay 2 (1999) | HipHop eJay 2 (2000) |
+|---|---|---|
+| Graphics DLL | `PXD32CL1.DLL` | `pxd32cl1.dll`, **same 23 exports** |
+| Audio engine | `PXD32D4.DLL`, 87 exports | `pxd32h4.dll`, **87 + 7** |
+| Front end | `Dancejay.exe` | `Hhejay2.exe` |
+| Layout | `K_640`, `SEITEN` | `K_640`, `seiten`, same format |
+| Block palettes | `DANCE2*.PAL` | `hh2*.pal` |
+| System check | `EJAY31A/32A/33A` | none shipped |
+
+The engine is named for its title - D4 for Dance, H4 for HipHop - and H4 is a
+strict superset: every one of D4's 87 exports plus `PInit`, `PPlay`, `PStart`,
+`PStop`, `PClose`, `Stretcher` and `W2P`, which is the time-stretch page that
+`seiten` lists and Dance eJay 2 does not have.
+
+Two things the host had hardcoded to Dance and no longer does. The block
+palettes are named for the title, and without the right ones the textures
+register and the blocks draw black - colourless, not absent, which is a
+confusing way to fail. And HipHop ships no intro bitmaps at all, because it has
+no system check; running the animation with nothing to draw from faults inside
+the DLL's own refresh, so the host now notices and skips it.
+
 ## The finding
 
 `DANCE02.DLL` (1997, 16-bit NE) exports 31 functions. `PXD32D4.DLL` (1999,
@@ -388,46 +429,6 @@ work/           scratch analysis output
 `../tools` is a checkout of [pcrecomp](https://github.com/sp00nznet/pcrecomp),
 the same sibling layout the other pcrecomp-family projects use.
 
-### It is not just Dance eJay: HipHop eJay 2 runs on the same host
-
-The engine shipped under a dozen eJay covers, and the test of whether any of
-this work generalises is to point it at one of the others. HipHop eJay 2 (2000)
-runs on this host with **four flags and no code changes to the engine path**:
-
-![HipHop eJay 2 on the same host](docs/img/hiphop2-workspace.png)
-
-*HipHop eJay 2's arrangement page, playing, out of the same `host32/ejay2.exe`
-that draws Dance eJay 2's. Its own artwork, its own control table, its own
-buttons - Loop, Drum, Bass, Keys, Guitar, Xtra down the left, Rap, Voice, FX,
-Wave, Record, Groove down the right - and its own palette on the blocks.*
-
-```
-ejay2.exe --engine pxd32h4.dll --pal hh2 --song --lib <a DANCE library>
-```
-
-What is shared and what is not, compared directly:
-
-| | Dance eJay 2 (1999) | HipHop eJay 2 (2000) |
-|---|---|---|
-| Graphics DLL | `PXD32CL1.DLL` | `pxd32cl1.dll`, **same 23 exports** |
-| Audio engine | `PXD32D4.DLL`, 87 exports | `pxd32h4.dll`, **87 + 7** |
-| Front end | `Dancejay.exe` | `Hhejay2.exe` |
-| Layout | `K_640`, `SEITEN` | `K_640`, `seiten`, same format |
-| Block palettes | `DANCE2*.PAL` | `hh2*.pal` |
-| System check | `EJAY31A/32A/33A` | none shipped |
-
-The engine is named for its title - D4 for Dance, H4 for HipHop - and H4 is a
-strict superset: every one of D4's 87 exports plus `PInit`, `PPlay`, `PStart`,
-`PStop`, `PClose`, `Stretcher` and `W2P`, which is the time-stretch page that
-`seiten` lists and Dance eJay 2 does not have.
-
-Two things the host had hardcoded to Dance and no longer does. The block
-palettes are named for the title, and without the right ones the textures
-register and the blocks draw black - colourless, not absent, which is a
-confusing way to fail. And HipHop ships no intro bitmaps at all, because it has
-no system check; running the animation with nothing to draw from faults inside
-the DLL's own refresh, so the host now notices and skips it.
-
 ## Getting Started
 
 You need your own discs. Nothing from either one is in this repository, and the
@@ -459,7 +460,8 @@ hosts read everything - artwork, layout, samples - off the install at runtime.
    python tools/conform.py
    ```
 
-   A good run on Dance eJay 1 + 2 together reports **5,834 passed, 8 failed**.
+   A good run on Dance eJay 1 + 2 and HipHop eJay 2 together reports **9,780
+   passed, 8 failed**.
    The eight are real and known: five library samples that are genuinely not a
    whole number of beats, two intro files that are songs rather than loops, and
    `METRO.PXD`, which is a plain RIFF WAV. The harness fails the build only if

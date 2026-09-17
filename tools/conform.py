@@ -199,7 +199,11 @@ def check_mix(root, rep):
             path = os.path.join(dirpath, name)
             with open(path, 'rb') as f:
                 d = f.read()
-            tag = d.find(b'Dance eJay')
+            # The program name is the title's, not Dance's: 'Dance eJay 2.0'
+            # here, 'HipHop eJay 2.0' there. Matching the literal string was
+            # the same Dance-shaped assumption the block palettes were.
+            m = re.search(rb'[A-Za-z ]{1,20}eJay ?[0-9]?[.][0-9]', d)
+            tag = m.start() if m else -1
             if not rep.check(tag > 0, 'MIX names its program', path):
                 continue
             i = d.index(b'\x00', tag) + 1
