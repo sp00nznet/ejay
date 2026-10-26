@@ -1,0 +1,20 @@
+{
+  "title": "eJay 2: Dance, HipHop and Techno eJay",
+  "repo": "sp00nznet/ejay",
+  "accent": "#f07818",
+  "note": {
+    "windows": "Point it at your eJay 2 disc, its .iso, or the installed program. The build takes a few minutes and about 2 GB; it needs Visual Studio's C++ build tools (about 3 GB), which are installed if they are missing - Windows asks for permission once.",
+    "darwin": "Point it at your eJay 2 disc, its .iso, or the installed program. The build takes a few minutes and about 2 GB. It needs Homebrew and Xcode's command line tools, and installs the rest with Homebrew.",
+    "default": "Point it at your eJay 2 disc, its .iso, or the installed program. The build takes a few minutes and about 2 GB. It needs gcc, CMake, Ninja, SDL2, SDL2_ttf, the Liberation fonts and Python's pefile and capstone from your package manager; if any are missing it says which, with the command to install them."
+  },
+  "game": {
+    "name": "eJay 2",
+    "files": ["autorun.in[f]|pxd32cl1.dl[l]|*.iso"]
+  },
+  "sources": [{ "repo": "sp00nznet/pcrecomp", "ref": "main", "dir": "pcrecomp" }],
+  "setup": {
+    "windows": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\setup.ps1", "-Yes", "-Game", "{game}"],
+    "default": ["bash", "setup.sh", "--yes", "--game-dir", "{game}"]
+  },
+  "play": "* (recomp).*"
+}

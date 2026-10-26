@@ -69,3 +69,12 @@ original/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# What setup leaves: the title copied off the disc, its launchers, the log,
+# and the lift's Python environment
+game/
+* (recomp).cmd
+* (recomp).sh
+* (recomp).command
+setup.log
+.venv/

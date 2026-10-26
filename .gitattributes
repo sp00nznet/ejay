@@ -1,0 +1,5 @@
+# Shell scripts run on Linux and macOS whatever line endings a Windows checkout uses
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf

@@ -1,0 +1,10 @@
+# The one-click installers (sp00nznet/recomp-launcher), from launcher/launcher.json.
+# Every push to main leaves them as artifacts; a v* tag puts them on its release.
+name: installer
+on:
+  push: { branches: [main], tags: ["v*"] }
+permissions: { contents: write }
+jobs:
+  installer:
+    uses: sp00nznet/recomp-launcher/.github/workflows/installer.yml@main
+    with: { name: eJay-2-Installer }

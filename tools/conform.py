@@ -63,29 +63,59 @@ def pxd_length(path):
     return struct.unpack('<I', h[k + 1:k + 5])[0]
 
 
-def check_samples(root, rep):
-    """Every sample is a whole number of beats at 140 BPM.
+def disc_of(root, path):
+    """The title a file belongs to: the disc (the first folder under the corpus
+    root), or the demo of another title the disc carries (Demo/<title>)."""
+    rel = os.path.relpath(path, root).split(os.sep)[:-1]
+    if not rel:
+        return '.'
+    for i, part in enumerate(rel[:-1]):
+        if part.lower() == 'demo':
+            return rel[0] + '/' + rel[i + 1]
+    return rel[0]
 
-    This is the check that found the tempo. At any other tempo the lengths come
-    out fractional - all of them, not a few.
+
+def whole(length, bpm):
+    beats = length / (RATE * 2 * 60.0 / bpm)
+    return abs(beats - round(beats)) < 0.01 and round(beats) >= 1
+
+
+def check_samples(root, rep):
+    """Every sample is a whole number of beats at its title's tempo.
+
+    This is the check that found the tempo: Dance eJay's 1,352 samples are all
+    whole beats at 140 BPM and fractional at any other. Not every title is at
+    140 (HipHop eJay 2 is 90), so each disc's tempo is the one, from 80 to 200
+    BPM, that makes the most of its samples whole - ties going to the nearest
+    to 140, since half a tempo makes every even-beat sample whole too - and
+    each sample is checked at that.
     """
     p0, f0 = rep.passed, rep.failed
-    n = 0
+    lengths = {}
     for dirpath, _, names in os.walk(root):
         for name in names:
             if not name.lower().endswith('.pxd'):
                 continue
             path = os.path.join(dirpath, name)
-            n += 1
             length = pxd_length(path)
-            if not rep.check(length is not None, 'tPxD header', path):
-                continue
-            beats = length / BEAT_BYTES
-            rep.check(abs(beats - round(beats)) < 0.01 and round(beats) >= 1,
-                      'whole beats at %g BPM' % BPM,
-                      '%s is %.3f beats (%d bytes)' % (path, beats, length))
+            # The hyper generator's sounds (HYP1-4, HYPER) are single notes it
+            # plays, not loops placed as blocks: whole beats is no claim of theirs.
+            hyper = os.path.basename(dirpath).lower().startswith('hyp')
+            if rep.check(length is not None, 'tPxD header', path) and not hyper:
+                lengths.setdefault(disc_of(root, path), []).append((path, length))
+    n = 0
+    for disc, items in sorted(lengths.items()):
+        score = {b: sum(whole(ln, b) for _, ln in items) for b in range(80, 201)}
+        bpm = max(score, key=lambda b: (score[b], -abs(b - BPM))) if len(items) >= 20 else int(BPM)
+        if not rep.quiet:
+            print('  %-24s %5d samples, %d BPM' % (disc, len(items), bpm))
+        for path, length in items:
+            n += 1
+            beats = length / (RATE * 2 * 60.0 / bpm)
+            rep.check(whole(length, bpm), 'whole beats at the disc\'s tempo',
+                      '%s is %.3f beats at %d BPM (%d bytes)' % (path, beats, bpm, length))
     if n:
-        rep.group('samples, whole beats @ %g' % BPM, rep.passed - p0, rep.failed - f0)
+        rep.group('samples, whole beats', rep.passed - p0, rep.failed - f0)
     return n
 
 
@@ -272,15 +302,18 @@ def check_inf(root, rep):
                     rep.check(off == prev_end, 'INF members back to back',
                               '%s: %s at %d, previous ended %d' % (path, r[2], off, prev_end))
                     prev_end = off + size
-                    rep.check(1 <= bars <= 16, 'INF bars is a block length', '%s: %s %d' % (path, r[2], bars))
+                    rep.check(1 <= bars <= 16, 'INF bars is a block length',
+                              '%s: %s %d' % (path, r[2], bars))
                     parts = h[5:5 + h[4]].decode('latin-1').split('\r\n')
                     if len(parts) > 4 and parts[4]:
                         cats.setdefault(grp, {}).setdefault(parts[4].lower(), 0)
                         cats[grp][parts[4].lower()] += 1
             for grp, c in cats.items():
                 top = max(c.values())
-                rep.check(top >= 0.9 * sum(c.values()) or sum(c.values()) < 10, 'INF group is one category',
-                          '%s: group %d is %s' % (path, grp, sorted(c.items(), key=lambda kv: -kv[1])[:3]))
+                total = sum(c.values())
+                common = sorted(c.items(), key=lambda kv: -kv[1])[:3]
+                rep.check(top >= 0.9 * total or total < 10, 'INF group is one category',
+                          '%s: group %d is %s' % (path, grp, common))
     if n:
         rep.group('sample archives', rep.passed - p0, rep.failed - f0)
     return n

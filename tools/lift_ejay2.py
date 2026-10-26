@@ -68,7 +68,8 @@ def rebase(src, dst, base):
         for e in blk.entries:
             if e.type == 3:
                 o = pe.get_offset_from_rva(e.rva)
-                struct.pack_into('<I', data, o, (struct.unpack_from('<I', data, o)[0] + delta) & 0xFFFFFFFF)
+                v = (struct.unpack_from('<I', data, o)[0] + delta) & 0xFFFFFFFF
+                struct.pack_into('<I', data, o, v)
     struct.pack_into('<I', data, pe.OPTIONAL_HEADER.get_file_offset() + 28, base)
     open(dst, 'wb').write(data)
 
@@ -100,8 +101,10 @@ def lift(dll, cat_path, seeds, out_dir, prefix):
     byaddr = {f['address']: f for f in cat['functions'] if cs <= f['address'] < ce}
     # Vtable slots the catalog missed, each bounded by the next known entry: a
     # slot handed `ce` would make the extent walk descend the whole of .text.
-    want = {e['address'] for e in json.load(open(seeds))
-            if cs <= e['address'] < ce and e['address'] not in byaddr} if os.path.exists(seeds) else set()
+    want = set()
+    if os.path.exists(seeds):
+        want = {e['address'] for e in json.load(open(seeds))
+                if cs <= e['address'] < ce and e['address'] not in byaddr}
     known = sorted(set(byaddr) | want)
     nxt = {a: (known[i + 1] if i + 1 < len(known) else ce) for i, a in enumerate(known)}
     for a in want:
@@ -136,8 +139,10 @@ def lift(dll, cat_path, seeds, out_dir, prefix):
             outside |= {t for t in behind if t not in reached} | called
             try:
                 lo = min(reached) if reached else addr
-                insns, leaders = (linear_disassemble_function(md, code, cs, lo, end, reached=reached)
-                                  if end > addr else ([], None))
+                insns, leaders = ([], None)
+                if end > addr:
+                    insns, leaders = linear_disassemble_function(md, code, cs, lo, end,
+                                                                 reached=reached)
                 if leaders is not None:
                     leaders.add(addr)
                 body = (lift_function_linear(lifter, name, insns, leaders, addr) if insns
@@ -169,7 +174,8 @@ def lift(dll, cat_path, seeds, out_dir, prefix):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('folder', help="the title's program folder (the one with PXD32CL1.DLL)")
     ap.add_argument('title', help='an id for this title: dance2, hiphop2, ...')
     ap.add_argument('--force', action='store_true')
@@ -178,14 +184,16 @@ def main():
         sys.exit('no pcrecomp toolkit beside this repo: set PCRECOMP, or clone it to ../pcrecomp')
     engine, gfx = find_dlls(args.folder)
     if not engine or not gfx:
-        sys.exit('%s has no PXD32?4.DLL and PXD32CL1.DLL: not an eJay 2-generation program folder' % args.folder)
+        sys.exit('%s has no PXD32?4.DLL and PXD32CL1.DLL: not an eJay 2-generation program folder'
+                 % args.folder)
     work = os.path.join(ROOT, 'work', args.title)
     os.makedirs(work, exist_ok=True)
     for name, src in (('engine', engine), ('gfx', gfx)):
         dll = os.path.join(work, name + '.dll')
         out = os.path.join(ROOT, 'src', 'recomp', args.title, 'gen_' + name)
         done = os.path.join(out, 'recomp_dispatch.inc')
-        if not args.force and os.path.exists(done) and os.path.getmtime(done) > os.path.getmtime(src):
+        fresh = os.path.exists(done) and os.path.getmtime(done) > os.path.getmtime(src)
+        if not args.force and fresh:
             print('  %-6s %s: lifted already' % (name, os.path.basename(src)))
             continue
         t0 = time.time()

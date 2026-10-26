@@ -27,19 +27,42 @@ jobs:
         # the README carries.
         run: python tools/conform.py
 
-  host:
-    name: eJay 2 host (32-bit)
+  host-windows:
+    name: eJay 2 host, Windows (32-bit, the DLLs as they are)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x86
       - name: Build
-        # The host loads two 32-bit 1999 DLLs, so it is 32-bit itself. It builds
-        # without them present; it needs them only to run.
-        run: cl /nologo /W3 /MD host32\ejay2.c /Fe:ejay2.exe user32.lib gdi32.lib winmm.lib ole32.lib
+        # build.bat finds Visual Studio with vswhere, as a player's setup does.
+        # The host builds without a disc; it needs one only to run.
+        shell: cmd
+        run: call host\build.bat
       - uses: actions/upload-artifact@v4
         with:
-          name: ejay2-host
-          path: ejay2.exe
+          name: ejay2-host-windows
+          path: build-windows/ejay2.exe
+
+  host-posix:
+    name: eJay 2 host, Linux (compiles against win32hle)
+    runs-on: ubuntu-latest
+    # The lifted DLLs come from a disc, so CI cannot link the Linux host. It can
+    # compile everything of ours against the toolkit's headers, which is where a
+    # portability mistake would show.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: sp00nznet/pcrecomp
+          path: pcrecomp
+      - run: sudo apt-get update && sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev
+      - name: Compile
+        run: |
+          H=pcrecomp/runtime/win32hle
+          for f in host/ejay2.c host/posix.c; do
+            cc -c -Wall -Werror -Wno-unused-function -Wno-format-truncation -fno-strict-aliasing -fwrapv \
+               -DRECOMP_RETADDR=0u -DRECOMP_LOCAL_REGS -DEJAY_TITLE='"ci"' \
+               -Ihost -I$H -Ipcrecomp/runtime/recomp32 $(pkg-config --cflags sdl2) \
+               "$f" -o "/tmp/$(basename "$f").o"
+          done
+      - name: The setup script parses
+        run: bash -n setup.sh
