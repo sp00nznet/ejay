@@ -4,6 +4,31 @@ Everything here was observed by calling `DANCE02.DLL`'s exports in recompiled
 code and watching what it asked the operating system for. Where something is
 inferred rather than observed, it says so.
 
+## Two lifter bugs worth naming
+
+Both were silent, and both were found by making the harness check something
+rather than by reading code.
+
+**Half the far calls went to the wrong place.** A far call in an NE binary can
+carry either of two fixups, and they do not mean the same thing: a `FAR_PTR`
+fixup supplies offset *and* segment, while a `SELECTOR` fixup patches only the
+segment word and leaves the offset in the instruction. The lifter took the
+relocation's offset for both, and a `SELECTOR` relocation reports offset 0 - so
+**154 of 319 far calls** jumped to offset 0 of the code segment. That is a real
+function, so they ran and returned instead of crashing, and `LibMain` reported
+success the whole time. `AInit` was three such calls and a return.
+
+**72 constants were fixup chain links.** `__AHINCR` and `__AHSHIFT` are not
+routines: the loader patches a value into the code stream at every site. Left
+alone, each site keeps what the file held, which for a chained fixup is the
+offset of the *next* site - a small, plausible number. `add ax, __AHINCR`,
+which walks a huge pointer to the next 64 KB tile, was adding 0x1B96 tiles.
+Nothing would have shown it until the first sample larger than 64 KB, which is
+every sample worth playing.
+
+The stack-balance check in the harness came out of the same instinct and
+immediately caught the test itself calling three exports with an empty stack.
+
 ## The exports, and what they cost to call
 
 A Win16 export is PASCAL: the callee pops its own arguments, so the argument

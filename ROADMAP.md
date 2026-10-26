@@ -1,69 +1,61 @@
 # Roadmap
 
-Two programs, one engine. Dance eJay 2's host is the furthest along because
-its DLLs are 32-bit and can be driven directly; Dance eJay 1's engine is 16-bit
-and has to be lifted before anything can drive it at all.
+Two generations of one engine. The eJay 2 family (Dance eJay 2, HipHop eJay 2,
+Techno eJay) runs on Windows, Linux and macOS through `host/ejay2.c`, driving
+each title's own DLLs. Dance eJay 1's engine is 16-bit and recompiled whole, and
+its sampler path is still silent.
 
 ## Now
 
-- **Dance eJay 2 - `.MIX` loading.** The disc ships thirteen saved arrangements
-  and none of them can be opened yet. The header, the per-track settings and the
-  sample-library table are decoded (seven libraries, sample ids 2000..7199); the
-  block list after it is delta-coded and is not read yet. This is what "play one
-  of the other songs" needs.
-- **Dance eJay 2 - output latency.** Beats land within 33-119ms of the playhead,
-  measured at the endpoint with `--onset`. Host tick quantisation is +-31ms of
-  that on its own, so the residual is small but not zero and there is no
-  calibration knob for it yet.
-- **Dance eJay 1 - the sampler path.** The engine initialises, decodes its intro
-  and streams it, but placing samples on the timeline still produces silence.
-  `docs/ENGINE.md` has where it stops.
+- **Dance eJay 1 - the sampler path.** The recompiled 1997 engine initialises,
+  decodes its intro and streams it, but placing samples on the timeline still
+  produces silence. [ENGINE](docs/ENGINE.md) has where it stops ("Why it is still
+  silent"). This is the next thing worked on, and what gets eJay 1 into the
+  launcher.
+- **Dance eJay 3 - the mixer never arms.** It draws, with its own library, and
+  `AGetTime` stays at 0. Its engine has two exports the others lack
+  (`ARegDelete`, `ARegUnIn`), which suggests a registration step to find in
+  `d_ejay3.exe`'s call sites with `tools/vb_declares.py`. [TITLES](docs/TITLES.md).
+- **`.MIX` loading.** Every disc ships saved arrangements (13 on Dance eJay 2,
+  18 on HipHop eJay 2) and none can be opened. The header, the per-track
+  settings and the sample-library table are decoded; the block list after it is
+  delta-coded and not read yet. This is what "play one of the songs on the disc"
+  needs, and with each title's own library now loading, the ids in it can be
+  resolved.
 
 ## Next
 
-- **A front end worth using.** The host is a command line with a window attached:
-  every arrangement is either generated or clicked together by hand, and there is
-  no transport, no save, no load. See "Interface" below.
-- **Sound device selection.** `ADevice` takes an argument and ignores it - the
-  engine enumerates and takes the first device that reports 44.1kHz 16-bit
-  stereo, so neither eJay exposes a device picker. The host can add one by
-  filtering `waveOutGetDevCaps` through the DLL's import table, which is the same
-  mechanism already used to count its GDI calls.
-- **More sibling titles.** HipHop eJay 2 already runs - see the README. The
-  same three flags should reach Techno eJay, Rave eJay and the rest of the
-  1999-2002 run; what is not known is how far back the layout format goes, since
-  Rave eJay is 1997 and shares the era of Dance eJay 1 rather than 2.
+- **A front end worth using.** The host opens on a generated demo arrangement;
+  blocks can be placed from the browser and dragged, and nothing else does
+  anything. eJay's artwork and control table already describe every button,
+  including its rolled-over and pressed frames - the work is wiring them to
+  actions (transport, new, load, save), not drawing them.
+- **Output latency.** Beats land 33-119 ms after the playhead, measured at the
+  endpoint with `--onset` on Windows. `--latency MS` is the knob; there is no
+  calibration yet, and off Windows nothing measures it.
+- **A label glitch.** On Techno eJay under win32hle a block's label can carry
+  another block's text: the graphics DLL's label pass leaves pixels behind that
+  Windows does not. Cosmetic.
+- **Apple silicon.** Built and run on macOS on x86-64. An arm64 Mac builds the
+  same 64-bit way, guest memory at a fixed address, and has not been run.
 
 ## Deferred
 
 - The horizontal scroll. eJay's grid is a sixteen-bar window onto a longer song
   (`K_SPUR_HSCROLL`), and the host only ever shows the first sixteen bars.
-- Recording, effects, and the mixer page. `ARec*`, `REffekt` and `RWave*` are
-  named in the engine and nothing here calls them.
+- The groove generator, recording, effects and the mixer page. The engine names
+  them (`RDrum`, `ARec*`, `REffekt`, `RWave*`) and nothing here calls them; Dance
+  eJay 2's groups 13 to 18 are the groove generator's sounds.
 - Resolutions above 640x480. `K_800`, `K_1024`, `K_1152` and `K_1280` parse
   already; only the 640 art set is wired up.
-
-## Interface
-
-The host is driven by flags, which suits measurement and suits nothing else.
-Two ways out, and they are not equivalent:
-
-- **Keep the engine's own window** and add the transport, a bar ruler and
-  load/save on top of it. eJay's artwork and control table already describe
-  every button, including its rolled-over and pressed frames - the work is
-  wiring them to actions, not drawing them. Nothing new to depend on, and the
-  program keeps looking like itself.
-- **Render to SDL** instead of GDI. Buys resizing, a frame clock and portability,
-  and costs the `PXD32CL1.DLL` drawing path: the graphics DLL blits into a device
-  context and it is the thing under test. It would have to draw into a DIB that
-  SDL then uploads, which is a texture copy per frame and a second window system
-  to be wrong about.
-
-The first is the plan. SDL is worth revisiting if this ever needs to run
-somewhere without GDI - which, for a host whose whole purpose is loading two
-1999 Windows DLLs, is not soon.
+- Rave eJay 1 and the Dance eJay Superpack: 32-bit, but an older engine
+  (`PXD32RA`, `PXD32OA`) with no `PXD32CL1.DLL` and 23 of the calls the host
+  relies on missing. They are Dance eJay 1's generation, and come after it.
+- Lifting `Dancejay.exe` itself (VB5 native, 1.27 MB) with `MSVBVM50.DLL` kept
+  real - pcrecomp's hybrid boundary. A rebuilt front end is the nearer route to
+  something playable.
 
 ## Out of scope
 
-- Redistributing anything off either disc. The tool ships; the discs do not.
-- The other eJay product lines that do not share this engine.
+- Redistributing anything off any disc. The tool ships; the discs do not.
+- eJay titles that do not share this engine (House eJay and later).

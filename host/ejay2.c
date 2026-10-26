@@ -366,7 +366,9 @@ static int load_inf(const char *root)
     if (!g_lib) g_lib = (SAMPLE *)gmem(sizeof(SAMPLE) * MAX_LIB);
     /* gather by group: the browser shows one group's run of the list */
     static int grp_of[MAX_LIB];
-    int bar_v[16] = { 0 }, bar_n[16] = { 0 };
+    enum { NB = 512 };                    /* distinct length-per-bar values: Dance eJay 3 has hundreds */
+    static int bar_v[NB], bar_n[NB];
+    memset(bar_n, 0, sizeof(bar_n));
     for (int f = 0; f < n; f++) {
         char path[MAX_PATH];
         snprintf(path, sizeof(path), "%s\\%s", root, names[f]);
@@ -404,8 +406,8 @@ static int load_inf(const char *root)
                 sm->len = units / 2;                    /* as eJay 1's: decoded 16-bit mono bytes */
                 if (units % sm->bars == 0) {
                     int v = units / sm->bars, k = 0;
-                    while (k < 16 && bar_n[k] && bar_v[k] != v) k++;
-                    if (k < 16) bar_v[k] = v, bar_n[k]++;
+                    while (k < NB && bar_n[k] && bar_v[k] != v) k++;
+                    if (k < NB) bar_v[k] = v, bar_n[k]++;
                 }
             }
             snprintf(sm->name, sizeof(sm->name), "%s", fld[2]);
@@ -415,7 +417,7 @@ static int load_inf(const char *root)
         free(txt);
     }
     int best = 0;
-    for (int k = 1; k < 16; k++) if (bar_n[k] > bar_n[best]) best = k;
+    for (int k = 1; k < NB; k++) if (bar_n[k] > bar_n[best]) best = k;
     if (bar_n[best] >= 20) g_bar = bar_v[best];
     /* Sort by group (stable, so each group keeps the .INF's order), then
      * record each group's run as the eJay 1 index does. */

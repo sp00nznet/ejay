@@ -309,7 +309,8 @@ is down.
 
 The `tPxD` decode lives on the `APlay` path, and it is version-agnostic: the
 1999 engine opens, decodes and plays eJay 1's 1996 samples without special
-pleading. Which matters, because eJay 2's own library ships on a second disc.
+pleading. (eJay 2's own library is on its disc after all - in `D_ejay2\PXD`, an
+archive with an `.INF`, which the host reads now: [TITLES](TITLES.md).)
 
 A `tPxD` header is the magic, then a NUL-terminated name written as two lines:
 
@@ -444,16 +445,16 @@ dispatch compares the argument against -1 *before* it looks at the object's
 switches every later call to a different renderer - the ending - which is why
 Dancejay calls -1 in the loop before `GFX_IntroClose` and nowhere else. Driving
 it first is what produced "no stall, black screen": the animation never ran at
-all. It is behind `--ending` now.
+all. The host no longer calls it.
 
-The single-jump probe `--refresh 3500` is worth knowing about as an artefact:
+A single-jump probe (`--refresh 3500`, in the bring-up host) is worth knowing about as an artefact:
 calling Refresh once with a timestamp 3.5 seconds ahead of nothing makes the
 animation try to cover the whole gap in one frame, which is stack-hungry enough
 to die without either exception handler getting to print. On a 64MB stack it
 survives and just takes a long time. Driven frame by frame, as the application
 drives it, none of that happens.
 
-## GFX_IntroSetKey stores a rect per name## GFX_IntroSetKey stores a rect per name
+## GFX_IntroSetKey stores a rect per name
 
 Eleven arguments: a name and ten numbers. The first four are **x, y, w, h** -
 the DLL stores `left = a1, top = a2, right = a1 + a3, bottom = a2 + a4`. In a
@@ -470,7 +471,7 @@ it was diffing the DLL's whole image across a single call with ten values that
 could not occur naturally - every dword that moves is somewhere SetKey writes,
 whatever arithmetic it did on the way.
 
-## GFX_IntroRefresh takes a timestamp## GFX_IntroRefresh takes a timestamp
+## GFX_IntroRefresh takes a timestamp
 
 Not a page number. The DLL compares its argument against 0xd48, 0xfb9, 0x1770,
 0x1ac2, 0x1c75, 0x50dc, 0x5d8e and 0x7148 - milliseconds into a 29-second
@@ -541,16 +542,58 @@ nothing in both.
 `GFX_IntroInitSplash` and `GFX_IntroShowSplash` have no call site in
 Dancejay.exe - the splash belongs to `LOADER.EXE`.
 
+## What APlay stores, and the 30 it holds
+
+`APlay`'s twelve arguments land in a 0x108-byte entry of the track it names,
+appended at the track's count (`+0x6A`), which then wraps at 30 - a track holds
+thirty entries:
+
+| arg | stored at | what |
+|---|---|---|
+| 1 | `+0x10` (word) | the sample id |
+| 2 | `+0xFC` | copied into the voice at `+0x50` (`+0x54` in the second voice path) |
+| 3 | `+0x100` | copied into the voice at `+0x54` |
+| 4 | `+0xF4` | copied into the voice at `+0x24`, then compared with a global |
+| 5 | `+0xF8` | copied into the voice at `+0x5C` |
+| 6 | `+0xF0` | the status word's address: the engine writes progress into it |
+| 7 | `+0x12` | the file name, `lstrcpyA`'d - so the caller's string can go |
+| 8 | | the track |
+| 9 | `+0` | the start, in engine units |
+| 9+10 | `+4` | the end; a length of 0 or less stores `0x6921CFF0`, "no end" |
+| 11 | `+8` | |
+| 12 | `+0x104` | `0x100` at every site |
+
+Arguments 4 and 5 looked like an offset and a size into a sample archive -
+Dancejay's real placement sites push them from two per-sample arrays - and are
+not: whatever they are, they never reach a file call, and the engine reads the
+whole file it is given from the start. [TITLES](TITLES.md) has what the host
+does about archives instead.
+
+## ACloseAll closes the pictures, not the song
+
+`ACloseAll` walks the 200 slots `ALoad` fills and calls `DeleteDC` and
+`DeleteObject` on each: it frees the bitmaps, not the arrangement. The first
+version of the host called it to clear the tracks before placing a moved block
+again, so every drop destroyed the workspace chrome and the button sheet it
+repaints from - silently, since the window already showed them. It surfaced
+when the paint check, rewritten to read the chrome back, found it black.
+
+Nothing in the engine removes an entry, so a move empties the tracks in place
+- count and cursor to 0, under `AStop` - and places every slot again, earliest
+first: the mixer walks a track's entries in order, comparing the next one's
+start with the transport, so an entry placed after a later one would never fire.
+
 ## Running it
 
-`host32/ejay2.exe` drives all of the above. It has to be built 32-bit (the DLLs
-are), from the eJay folder so the relative bitmap paths resolve:
+`host/ejay2.c` drives all of the above, on Windows from `host\build.bat` and on
+Linux and macOS from `host/CMakeLists.txt` after `tools/lift_ejay2.py`
+([PORTING](PORTING.md)). Run it from the title's program folder, so the relative
+bitmap paths resolve:
 
 ```
-host32/build.bat host32/ejay2.c host32/ejay2.exe
-cd <ejay folder>
-ejay2.exe --ticks 2000 --volume 3 --dplay --shot out.bmp
+cd <the program folder>
+ejay2 --song --lib ..\PXD --ticks 0
 ```
 
-`--volume` is a percentage and is scaled into `ALautSet`'s 0..32768 before it
-gets there. Keep it low.
+`--volume` is a percentage scaled into `ALautSet`'s 0..32768 before it gets
+there, and the output stays muted until the mixer arms. Keep it low.

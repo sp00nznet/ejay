@@ -50,9 +50,11 @@ def find_dlls(folder):
     """The title's engine and graphics DLL, by name pattern, any case."""
     files = {os.path.basename(p).lower(): p for p in glob.glob(os.path.join(folder, '*'))}
     gfx = files.get('pxd32cl1.dll')
-    # PXD32D4 (Dance), PXD32H4 (HipHop): the engine is named for its title.
+    # PXD32D4 (Dance), PXD32H4 (HipHop), PXD32R4 (Techno), pxd32d5 (Dance 3): named for
+    # the title. Not pxd32ha, pxd32t2 or PXD32RA, which HipHop eJay 2 also ships.
     engines = sorted(p for n, p in files.items()
-                     if len(n) == 11 and n.startswith('pxd32') and n.endswith('4.dll'))
+                     if len(n) == 11 and n.startswith('pxd32') and n[6] in '45'
+                     and n.endswith('.dll'))
     return (engines[0] if engines else None), gfx
 
 
