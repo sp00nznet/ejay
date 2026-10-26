@@ -84,13 +84,13 @@ static gva gfx(const char *name) { return g_gfx ? dll_proc(g_gfx, name) : 0; }
  *             `imul eax, eax, 0x84; add eax, <tracks>`, then reads the
  *             entry count at +0x6A. Count +0x6A, cursor +0x68, entry array +0x64.
  *   g_armed   the word the mixer will not run without. RTimer's first call is
- *             the mixer tick, which tests it `movsx ecx, word ptr [armed];
- *             test ecx, ecx; jle`.
+ *             the mixer tick, whose first `movsx r32, word ptr [armed];
+ *             test r32, r32; jle` tests it (ecx in PXD32D4, H4 and R4; eax
+ *             in PXD32D5).
  *
- * Both match in PXD32D4, PXD32H4 and PXD32R4; PXD32D5's tick is shaped
- * differently and has no g_armed. A pattern that is not there leaves 0, and
- * the host does without (see the main loop). g_d4 marks Dance eJay 2's own
- * engine, the one whose other offsets --verbose and --tracks print. */
+ * A pattern that is not there leaves 0, and the host does without (see the
+ * main loop). g_d4 marks Dance eJay 2's own engine, the one whose other
+ * offsets --verbose and --tracks print. */
 static gva g_tracks, g_armed;
 static int g_d4;
 
@@ -122,8 +122,9 @@ static void find_layout(void)
                 gva tick = rtimer + (uint32_t)i + 5 + (uint32_t)rel;
                 const uint8_t *b = (const uint8_t *)HOSTP(tick);
                 for (int k = 0; k + 10 < 0x200; k++)
-                    if (b[k] == 0x0F && b[k + 1] == 0xBF && b[k + 2] == 0x0D &&
-                        b[k + 7] == 0x85 && b[k + 8] == 0xC9 && b[k + 9] == 0x7E) {
+                    if (b[k] == 0x0F && b[k + 1] == 0xBF && (b[k + 2] & 0xC7) == 0x05 &&     /* movsx r, [abs32] */
+                        b[k + 7] == 0x85 && b[k + 8] == (0xC0 | (b[k + 2] & 0x38) | ((b[k + 2] >> 3) & 7)) &&
+                        b[k + 9] == 0x7E) {
                         memcpy(&g_armed, b + k + 3, 4);
                         break;
                     }
@@ -523,6 +524,7 @@ typedef struct {
     int  x, y, w, h;
     int  sx[3], sy[3];
     int  raw[10];        /* unscaled, for the calls that want them as written */
+    int  live;           /* on the page showing (SEITEN), so it answers the mouse */
 } KCTRL;
 
 static KCTRL g_ctrl[640];
@@ -574,6 +576,35 @@ static int load_keys(const char *path)
     return g_ctrl_n;
 }
 
+/* K_640 holds every page's controls, and the drum pads (`:Drumpads`) sit
+ * right over the track grid. SEITEN says which controls are on which page -
+ * a `:Name` line, then the page's bitmaps and controls - so only `page`'s
+ * answer the mouse. Without SEITEN, all of them do. Case is the title's own:
+ * Dance eJay 2 ships SEITEN, HipHop eJay 2 seiten; xfopen matches either. */
+static void mark_page(const char *page)
+{
+    char *buf = slurp("SEITEN", NULL);
+    int on = 0, n = 0;
+    if (!buf) { for (int i = 0; i < g_ctrl_n; i++) g_ctrl[i].live = 1; return; }
+    for (char *line = strtok(buf, "\r\n"); line; line = strtok(NULL, "\r\n")) {
+        if (line[0] == ':') {
+            char *e = line + 1 + strlen(line + 1);
+            while (e > line + 1 && e[-1] == ' ') *--e = 0;
+            on = !strcmp(line + 1, page);
+            continue;
+        }
+        if (!on) continue;
+        char name[32];
+        int k = 0;
+        while (line[k] && line[k] != ' ' && k < 31) { name[k] = line[k]; k++; }
+        name[k] = 0;
+        for (int i = 0; i < g_ctrl_n; i++)
+            if (!strcmp(g_ctrl[i].name, name)) { g_ctrl[i].live = 1; n++; }
+    }
+    free(buf);
+    printf("  page %-21s -> %d controls\n", page, n);
+}
+
 static const KCTRL *find_ctrl(const char *name)
 {
     for (int i = 0; i < g_ctrl_n; i++)
@@ -586,7 +617,7 @@ static int ctrl_at(int x, int y)
 {
     for (int i = 0; i < g_ctrl_n; i++) {
         const KCTRL *c = &g_ctrl[i];
-        if (c->name[0] != 'B' || c->name[1] != '_') continue;
+        if (c->name[0] != 'B' || c->name[1] != '_' || !c->live) continue;
         if (!c->sx[1] && !c->sy[1]) continue;        /* no rollover state */
         if (x >= c->x && x < c->x + c->w && y >= c->y && y < c->y + c->h)
             return i;
@@ -685,13 +716,31 @@ static void draw_blocks(HDC dst)
 
 /* Which category button is under the pointer, or -1: down the left column
  * first, then the right, the order SEITEN lists them in. */
+/* Group i's button, from the title's own control table: B_GRUPPE_01 is group
+ * 1's, and so on - Dance eJay 2 has six a side, Techno eJay five, HipHop
+ * eJay 2 puts 12 above 10 and 11. Zero-sized or absent: no button. Without
+ * K_640 at all, Dance eJay 2's measured layout. */
+static int group_button(int i, RECT *r)
+{
+    if (g_ctrl_n) {
+        char nm[16];
+        snprintf(nm, sizeof(nm), "B_GRUPPE_%02d", i + 1);
+        const KCTRL *c = find_ctrl(nm);
+        if (!c || c->w <= 0 || c->h <= 0) return 0;
+        r->left = c->x; r->top = c->y; r->right = c->x + c->w; r->bottom = c->y + c->h;
+        return 1;
+    }
+    r->left = (i < 6) ? BTN_LX : BTN_RX;
+    r->top = BTN_Y0 + (i % 6) * BTN_PITCH;
+    r->right = r->left + BTN_W; r->bottom = r->top + BTN_H;
+    return 1;
+}
+
 static int hit_group(int x, int y)
 {
-    for (int i = 0; i < 12; i++) {
-        int bx = (i < 6) ? BTN_LX : BTN_RX;
-        int by = BTN_Y0 + (i % 6) * BTN_PITCH;
-        if (x >= bx && x < bx + BTN_W && y >= by && y < by + BTN_H) return i;
-    }
+    RECT r;
+    for (int i = 0; i < 12; i++)
+        if (group_button(i, &r) && x >= r.left && x < r.right && y >= r.top && y < r.bottom) return i;
     return -1;
 }
 
@@ -1052,8 +1101,10 @@ static int paint_check(HWND wnd, const char *shot)
             int inside =
                 (y >= GRID_Y0 && y < GRID_Y1 && x >= GRID_X0 && x < GRID_X1) ||
                 (y >= (int)g_browse.top && y < (int)g_browse.bottom &&
-                 x >= (int)g_browse.left && x < (int)g_browse.right + g_scroll_w) ||
-                (y >= 340 && y < 475 && ((x >= 100 && x < 170) || (x >= 555 && x < 635)));
+                 x >= (int)g_browse.left && x < g_scroll_x + g_scroll_w + 2);
+            RECT r;
+            for (int i = 0; !inside && i < 12; i++)        /* the category buttons, lit or not */
+                inside = group_button(i, &r) && x >= r.left - 1 && x <= r.right && y >= r.top - 1 && y <= r.bottom;
             if (!inside) { if (fy < 0) { fy = y; fx = x; } stray++; }
         }
     if (ok && stray && shot) {                   /* both pictures, to see what differs */
@@ -1075,10 +1126,10 @@ static int paint_check(HWND wnd, const char *shot)
 static int browser_selftest(void)
 {
     int bad = 0;
+    RECT r;
     for (int i = 0; i < 12; i++) {
-        int bx = (i < 6) ? BTN_LX : BTN_RX;
-        int by = BTN_Y0 + (i % 6) * BTN_PITCH;
-        int got = hit_group(bx + BTN_W / 2, by + BTN_H / 2);
+        if (!group_button(i, &r)) continue;
+        int got = hit_group((int)(r.left + r.right) / 2, (int)(r.top + r.bottom) / 2);
         if (got != i) { printf("  ! button %d hit-tests as %d\n", i, got); bad++; }
     }
     if (hit_group((int)g_browse.left + 40, (int)g_browse.top + 40) != -1) {
@@ -1368,6 +1419,7 @@ int main(int argc, char **argv)
         snprintf(path, sizeof(path), "%s\\EJAY02A", gfxdir);
         load_bitmap(ALoad, g_sheet, path);
         printf("  K_640 controls             -> %d\n", load_keys("K_640"));
+        mark_page("Hauptbild");
         browser_geometry();
         grid_geometry();
     }
@@ -1397,6 +1449,9 @@ int main(int argc, char **argv)
             for (int i = 0; i < 3; i++) {
                 char pal[MAX_PATH];
                 snprintf(pal, sizeof(pal), "%s%s.PAL", palname, suffix[i]);
+                FILE *pf = xfopen(pal, "rb");           /* Techno eJay ships RAVE2.PAL alone */
+                if (pf) fclose(pf);
+                else snprintf(pal, sizeof(pal), "%s.PAL", palname);
                 tex[i] = (int)X(AddTex, GSTR(texa[i]), GSTR(texb[i]), GSTR(pal), 12, 25, 112);
             }
             printf("  GFX_SampleAddTexturePair    -> %d %d %d\n", tex[0], tex[1], tex[2]);
