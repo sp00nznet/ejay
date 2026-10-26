@@ -256,10 +256,14 @@ static char *slurp(const char *path, long *len)
 
 /* The unit APlay's start and length are in, measured rather than guessed: the
  * transport advances 176,400 per second of playback - 44,100 frames of 16-bit
- * stereo, so an output byte - and eJay's tempo is a fixed 140 BPM, so a 4/4
- * bar is 1.714 seconds: 302,400. (88,200, 120 BPM in samples, was wrong in
- * both, and made every arrangement fire and die in its first few seconds.) */
-#define BAR_UNITS 302400
+ * stereo, so an output byte. A bar is four beats at the title's tempo, which is
+ * fixed per title and is not the same in all of them: Dance eJay 1 and 2,
+ * Techno eJay and Dance eJay 3 are 140 BPM, a bar of 1.714 seconds, 302,400;
+ * HipHop eJay 2 is 90 BPM, 470,400. The samples say which (load_inf). (88,200,
+ * 120 BPM in samples, was wrong in both, and made every arrangement fire and
+ * die in its first few seconds.) */
+#define BAR_140 302400
+static int g_bar = BAR_140;               /* engine units in a bar, this title */
 
 /* How long a sample is, from its own header: the tag, a Pascal-string name, a
  * 0x54 byte, then the decoded length as a byte count of 16-bit mono PCM -
@@ -322,7 +326,7 @@ static int load_index(const char *root)
         /* Whole bars, rounded up: the end an entry is given is also when the
          * lane is free again, and rounding down would cut the tail off every
          * loop not exactly on the bar. A quarter-bar hit still occupies one. */
-        sm->bars = sm->len ? (sm->len * 2 + BAR_UNITS - 1) / BAR_UNITS : atoi(bars);
+        sm->bars = sm->len ? (sm->len * 2 + BAR_140 - 1) / BAR_140 : atoi(bars);
         if (sm->bars < 1 || sm->bars > 16) sm->bars = 1;
         g_lib_n++;
     }
@@ -342,6 +346,12 @@ static int load_index(const char *root)
  * handed the archive with the offset and size as its fourth and fifth
  * arguments, as Dancejay's placement sites do.
  *
+ * Each member's tPxD header carries its length in eighths of an engine unit
+ * (an eJay 1 header's field, by contrast, is in halves), so length / bars is
+ * the bar - and the commonest one is the title's tempo: 302,400 (140 BPM) for
+ * Dance eJay 2's 455 one-bar loops, 470,400 (90 BPM) for HipHop eJay 2's
+ * 3,052.
+ *
  * The group is the button: in Dance eJay 2, 1 to 10 are Loop, Drum, Bass,
  * Guitar, Seq, Layer, Rap, Voice, Effect, Xtra - the category line in each
  * sample's own header says so for every one - and 13 to 18 (Kick, Snare,
@@ -356,6 +366,7 @@ static int load_inf(const char *root)
     if (!g_lib) g_lib = (SAMPLE *)gmem(sizeof(SAMPLE) * MAX_LIB);
     /* gather by group: the browser shows one group's run of the list */
     static int grp_of[MAX_LIB];
+    int bar_v[16] = { 0 }, bar_n[16] = { 0 };
     for (int f = 0; f < n; f++) {
         char path[MAX_PATH];
         snprintf(path, sizeof(path), "%s\\%s", root, names[f]);
@@ -364,6 +375,7 @@ static int load_inf(const char *root)
         if (!p) { free(txt); continue; }
         char archive[MAX_PATH];
         snprintf(archive, sizeof(archive), "%s\\%.*s", root, (int)(strlen(names[f]) - 4), names[f]);
+        FILE *af = xfopen(archive, "rb");
         p += 9;
         while (g_lib_n < MAX_LIB) {
             char fld[12][64];
@@ -384,11 +396,27 @@ static int load_inf(const char *root)
             sm->bars = atoi(fld[7]);
             if (sm->bars < 1 || sm->bars > 16) sm->bars = 1;
             sm->len = 0;
+            unsigned char h[400];
+            if (af && fseek(af, sm->off, SEEK_SET) == 0 && fread(h, 1, sizeof(h), af) > 16 && !memcmp(h, "tPxD", 4) &&
+                5 + h[4] + 5 < (int)sizeof(h) && h[5 + h[4]] == 0x54) {
+                const unsigned char *q = h + 6 + h[4];
+                int units = (int)((q[0] | q[1] << 8 | q[2] << 16 | (unsigned)q[3] << 24) * 4u);
+                sm->len = units / 2;                    /* as eJay 1's: decoded 16-bit mono bytes */
+                if (units % sm->bars == 0) {
+                    int v = units / sm->bars, k = 0;
+                    while (k < 16 && bar_n[k] && bar_v[k] != v) k++;
+                    if (k < 16) bar_v[k] = v, bar_n[k]++;
+                }
+            }
             snprintf(sm->name, sizeof(sm->name), "%s", fld[2]);
             grp_of[g_lib_n++] = atoi(fld[8]);
         }
+        if (af) fclose(af);
         free(txt);
     }
+    int best = 0;
+    for (int k = 1; k < 16; k++) if (bar_n[k] > bar_n[best]) best = k;
+    if (bar_n[best] >= 20) g_bar = bar_v[best];
     /* Sort by group (stable, so each group keeps the .INF's order), then
      * record each group's run as the eJay 1 index does. */
     int cnt = g_lib_n - before;
@@ -911,7 +939,7 @@ static int place_all(int ids)
     for (int j = 0; j < n && g_aplay; j++) {
         const SLOT *sl = &g_song[order[j]];
         if (sl->lib < 0 || sl->lib >= g_lib_n) continue;
-        place(ids ? order[j] + 1 : 0, order[j], &g_lib[sl->lib], sl->lane, sl->bar * BAR_UNITS, sl->bars * BAR_UNITS);
+        place(ids ? order[j] + 1 : 0, order[j], &g_lib[sl->lib], sl->lane, sl->bar * g_bar, sl->bars * g_bar);
         placed++;
     }
     return placed;
@@ -1316,7 +1344,8 @@ int main(int argc, char **argv)
         libdir = plat_lib_root(libdir);
         int n = load_index(libdir);
         if (!n) n = load_inf(libdir);
-        printf("  sample library             -> %d samples in %d groups under %s\n", n, g_grp_n, libdir);
+        printf("  sample library             -> %d samples in %d groups under %s, a bar is %d (%.0f BPM)\n",
+               n, g_grp_n, libdir, g_bar, 176400.0 * 240 / g_bar);
         build_song();
         printf("  arrangement                -> %d slots\n", g_song_n);
     }
@@ -1544,7 +1573,7 @@ int main(int argc, char **argv)
             static SAMPLE *one;
             if (!one) one = (SAMPLE *)gmem(sizeof(SAMPLE));
             snprintf(one->path, sizeof(one->path), "%s", full);
-            place(1, 64, one, 0, playpos, playlen ? playlen : BAR_UNITS);
+            place(1, 64, one, 0, playpos, playlen ? playlen : g_bar);
             printf("  APlay(%s) at %d, status %d\n", full, playpos, g_status[64]);
         }
         if (verbose) peek("after APlay");
@@ -1604,7 +1633,7 @@ int main(int argc, char **argv)
             /* AGetTime reports milliseconds. --latency backs the line off by
              * the output delay: measured with --onset, a beat leaves the
              * endpoint 40-100ms after AGetTime says its block started. */
-            draw_cursor(wnd, ((int)X(AGetTime, 0) - latency) / (BAR_UNITS / 176.4 * GRID_BARS));
+            draw_cursor(wnd, ((int)X(AGetTime, 0) - latency) / (g_bar / 176.4 * GRID_BARS));
         else if (main_screen && dplay && DGetZeit) {
             /* DGetZeit is a byte offset into the decoded stream. Retrigger the
              * sample when the engine says it has finished. */
@@ -1612,7 +1641,7 @@ int main(int argc, char **argv)
                 played += (int)X(DGetZeit, (uint32_t)chan);
                 X(DPlayFile, GSTR(playfile), 0, (uint32_t)chan);
             }
-            draw_cursor(wnd, (played + (int)X(DGetZeit, (uint32_t)chan)) / (BAR_UNITS * 16.0));
+            draw_cursor(wnd, (played + (int)X(DGetZeit, (uint32_t)chan)) / (g_bar * 16.0));
         }
         int rc = 0;
         /* Refresh's argument is milliseconds into the intro: the DLL compares
@@ -1638,7 +1667,7 @@ int main(int argc, char **argv)
                     SLOT *sl = &g_song[g_song_n++];
                     sl->lane = lane; sl->bar = atbar;
                     sl->bars = g_lib[g_place].bars; sl->lib = g_place;
-                    if (g_aplay) place(g_song_n, 65, &g_lib[g_place], lane, atbar * BAR_UNITS, sl->bars * BAR_UNITS);
+                    if (g_aplay) place(g_song_n, 65, &g_lib[g_place], lane, atbar * g_bar, sl->bars * g_bar);
                     printf("  placed %s / %s -> lane %d, bar %d, %d bars\n",
                            g_lib[g_place].l1, g_lib[g_place].l2, lane, atbar, sl->bars);
                     draw_blocks(g_canvas);
@@ -1672,14 +1701,14 @@ int main(int argc, char **argv)
             else if (quiet >= 4) {
                 quiet = 0;
                 int ms   = AGetTime ? (int)X(AGetTime, 0) : 0;
-                double b = ms / (BAR_UNITS / 176.4);
+                double b = ms / (g_bar / 176.4);
                 int headx = bar_x(b), best = -1;
                 for (int k = 0; k < g_song_n; k++)
                     if (best < 0 || fabs(g_song[k].bar - b) < fabs(g_song[best].bar - b)) best = k;
                 int blockx = best < 0 ? -1 : bar_x(g_song[best].bar);
                 printf("    onset at %6d ms = bar %5.2f  playhead x=%3d  nearest block bar %2d x=%3d  off %+4d px %+6.0f ms\n",
                        ms, b, headx, best < 0 ? -1 : g_song[best].bar, blockx, best < 0 ? 0 : headx - blockx,
-                       best < 0 ? 0.0 : (b - g_song[best].bar) * (BAR_UNITS / 176.4));
+                       best < 0 ? 0.0 : (b - g_song[best].bar) * (g_bar / 176.4));
                 if (shot && shots < onset) {
                     char f[MAX_PATH];
                     snprintf(f, sizeof(f), "%s.onset%d.bmp", shot, shots++);
@@ -1735,11 +1764,11 @@ int main(int argc, char **argv)
             for (int i = 0; i < g_song_n; i++) {
                 const SLOT *sl = &g_song[i];
                 if (sl->lib < 0 || sl->lib >= g_lib_n) continue;
-                double b0 = (double)sl->bar * BAR_UNITS;
-                double b1 = b0 + (g_lib[sl->lib].len ? g_lib[sl->lib].len * 2.0 : sl->bars * (double)BAR_UNITS);
+                double b0 = (double)sl->bar * g_bar;
+                double b1 = b0 + (g_lib[sl->lib].len ? g_lib[sl->lib].len * 2.0 : sl->bars * (double)g_bar);
                 if (at >= b0 && at < b1) want++;
             }
-            printf("    %4.1f  %5.3f  %-4d |", at / BAR_UNITS, m, want);
+            printf("    %4.1f  %5.3f  %-4d |", at / g_bar, m, want);
             for (int j = 0; j < (int)(m * 40.0f + 0.5f); j++) putchar('#');
             putchar('\n');
         }

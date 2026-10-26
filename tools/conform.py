@@ -231,6 +231,61 @@ def check_mix(root, rep):
     return n
 
 
+def check_inf(root, rep):
+    """An eJay 2-generation library: an .INF of twelve-line records and the
+    archive it indexes. The host relies on every record's offset landing on a
+    tPxD header, on the records being the archive's members back to back, on
+    the bars field being a block length, and on each group being one category
+    of sound - the header's own category line agrees - since the group is the
+    browser button."""
+    p0, f0 = rep.passed, rep.failed
+    n = 0
+    for dirpath, _, names in os.walk(root):
+        for name in names:
+            if not name.lower().endswith('.inf') or name.lower() == 'autorun.inf':
+                continue
+            path = os.path.join(dirpath, name)
+            archive = path[:-4]
+            if not os.path.isfile(archive):
+                continue
+            lines = open(path, 'rb').read().decode('latin-1').splitlines()
+            if '[SAMPLES]' not in lines:
+                continue
+            n += 1
+            i = lines.index('[SAMPLES]') + 1
+            cats = {}
+            prev_end = 0
+            with open(archive, 'rb') as a:
+                while i + 12 <= len(lines):
+                    r = [x.strip('"') for x in lines[i:i + 12]]
+                    i += 12
+                    try:
+                        off, size, bars, grp = int(r[3]), int(r[4]), int(r[7]), int(r[8])
+                    except ValueError:
+                        rep.check(False, 'INF record parses', '%s: %s' % (path, r[:4]))
+                        break
+                    a.seek(off)
+                    h = a.read(300)
+                    if not rep.check(h[:4] == b'tPxD', 'INF offset lands on a sample',
+                                     '%s: %s at %d' % (path, r[2], off)):
+                        continue
+                    rep.check(off == prev_end, 'INF members back to back',
+                              '%s: %s at %d, previous ended %d' % (path, r[2], off, prev_end))
+                    prev_end = off + size
+                    rep.check(1 <= bars <= 16, 'INF bars is a block length', '%s: %s %d' % (path, r[2], bars))
+                    parts = h[5:5 + h[4]].decode('latin-1').split('\r\n')
+                    if len(parts) > 4 and parts[4]:
+                        cats.setdefault(grp, {}).setdefault(parts[4].lower(), 0)
+                        cats[grp][parts[4].lower()] += 1
+            for grp, c in cats.items():
+                top = max(c.values())
+                rep.check(top >= 0.9 * sum(c.values()) or sum(c.values()) < 10, 'INF group is one category',
+                          '%s: group %d is %s' % (path, grp, sorted(c.items(), key=lambda kv: -kv[1])[:3]))
+    if n:
+        rep.group('sample archives', rep.passed - p0, rep.failed - f0)
+    return n
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description='eJay format conformance harness')
     ap.add_argument('--root', default=os.path.join(
@@ -249,7 +304,7 @@ def main(argv):
     rep = Report(args.quiet)
     print('conform: checking %s' % args.root)
     found = (check_samples(args.root, rep) + check_layout(args.root, rep) +
-             check_index(args.root, rep) + check_mix(args.root, rep))
+             check_index(args.root, rep) + check_mix(args.root, rep) + check_inf(args.root, rep))
     if not found:
         print('conform: %s holds no eJay files - nothing to check.' % args.root)
         return 0
