@@ -18,8 +18,8 @@ one-click installer or one setup script, with your own disc.
   (`tools/lift_ejay2.py`) and run on pcrecomp's `runtime/win32hle`; the same
   host source builds against the real DLLs on Windows and against win32hle
   elsewhere, as a 64-bit program (`host/plat.h`, `host/posix.c`,
-  `host/CMakeLists.txt`; [PORTING](docs/PORTING.md)). Needs pcrecomp with the
-  win32hle changes listed there.
+  `host/CMakeLists.txt`; [PORTING](docs/PORTING.md)). Needs pcrecomp at
+  7bbc0c0 or later (pcrecomp#135, #140-#143).
 - **Techno eJay** (Rave eJay 2 in France, the same program) runs on the host,
   and **Dance eJay 3** draws on it, silently ([TITLES](docs/TITLES.md)).
 - **Each title's own sample library.** `--lib` reads an `.INF` and its archive

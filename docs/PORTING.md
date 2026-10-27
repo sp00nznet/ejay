@@ -89,15 +89,15 @@ win32hle shim, so win32hle's window manager calls it as it would a guest's.
 ## What win32hle needed
 
 The engine and an MFC DLL ask for things no game on win32hle had asked for.
-These went into pcrecomp as their own changes:
+These went into pcrecomp as their own changes, in its main from 7bbc0c0:
 
 | | Why |
 |---|---|
-| `mixerOpen` & co., `waveIn*` answering "no such device"; `waveOutSetVolume`, `GetVolume`, `GetID` | `AInit` opens the card's mixer and its recording input before it starts DirectSound |
-| `GetProcessVersion`, `GlobalFlags`, `DuplicateHandle`, `LockFile`, `GetSysColorBrush` | MFC's start-up, in `PXD32CL1.DLL`'s `DllMain` |
-| `LoadImageA` and `LoadBitmapA` making real DIB sections; `GetObjectA` | the sample blocks are drawn from six texture `.bmp` files that `GFX_SampleAddTexturePair` loads and reads back through `GetObjectA`'s `bmBits`. With the old placeholder handle every block drew black |
-| `OpenFile`, `_hread`; LZ32 with SZDD expansion | `ALoad` opens every bitmap through `OpenFile`, and three of the artwork files are SZDD-compressed |
-| Small Fonts, Terminal and Fixedsys drawn unsmoothed | the block labels are drawn in Small Fonts and read back; an antialiased stand-in's grey edges came out as stray green and magenta |
+| `mixerOpen` & co., `waveIn*` answering "no such device"; `waveOutSetVolume`, `GetVolume`, `GetID` (pcrecomp#135) | `AInit` opens the card's mixer and its recording input before it starts DirectSound |
+| `GetProcessVersion`, `GlobalFlags`, `DuplicateHandle`, `LockFile`, `GetSysColorBrush` (pcrecomp#140) | MFC's start-up, in `PXD32CL1.DLL`'s `DllMain` |
+| `LoadImageA` and `LoadBitmapA` making real DIB sections; `GetObjectA` (pcrecomp#141) | the sample blocks are drawn from six texture `.bmp` files that `GFX_SampleAddTexturePair` loads and reads back through `GetObjectA`'s `bmBits`. With the old placeholder handle every block drew black |
+| `OpenFile`, `_hread`; LZ32 with SZDD expansion (pcrecomp#142) | `ALoad` opens every bitmap through `OpenFile`, and three of the artwork files are SZDD-compressed |
+| Small Fonts, Terminal and Fixedsys drawn unsmoothed (pcrecomp#143) | the block labels are drawn in Small Fonts and read back; an antialiased stand-in's grey edges came out as stray green and magenta |
 
 ## Guarding the speakers
 
